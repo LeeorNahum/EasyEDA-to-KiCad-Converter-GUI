@@ -4,6 +4,17 @@ import tkinter.font as tkFont
 import subprocess
 from pathlib import Path
 import os
+import sys  # Ensure sys is imported
+
+# Define resource_path
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 # Tooltip class for adding hover explanations
 class ToolTip:
@@ -384,9 +395,11 @@ def validate_inputs(*args):
 root = tk.Tk()
 root.title("EasyEDA to KiCad Converter GUI")
 root.resizable(False, False)
-# Set the window icon
+
+# Set the window icon using resource_path
+icon_path = resource_path('easyeda2kicad_gui.ico')  # Use resource_path to locate the icon
 try:
-    root.iconbitmap('easyeda2kicad_gui.ico')
+    root.iconbitmap(icon_path)
 except Exception as e:
     print(f"Warning: Unable to set icon. {e}")
 
@@ -523,4 +536,5 @@ for var in variables_to_trace:
 validate_inputs()
 update_command_display()
 
+# Start the main loop
 root.mainloop()
