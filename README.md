@@ -15,7 +15,7 @@
 
 ## Screenshot
 
-![Screenshot of the program GUI](gui image.png)
+![Screenshot of the program GUI](https://github.com/user-attachments/assets/03a8327a-43cb-4671-a487-c00fb5cebaf0)
 
 ## Install Dependency
 
