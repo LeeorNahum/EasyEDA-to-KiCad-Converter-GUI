@@ -2,6 +2,8 @@
 
 **EasyEDA to KiCad Converter GUI** is a user-friendly graphical interface built with Python's Tkinter library. It allows you to effortlessly convert electronic components from [EasyEDA](https://easyeda.com/) or [LCSC](https://www.lcsc.com/) into KiCad-compatible libraries, including symbols, footprints, and 3D models. This tool streamlines your PCB design workflow, especially when utilizing [JLCPCB SMT assembly services](https://jlcpcb.com/caa). It supports library formats for both KiCad v6.x and KiCad v5.x.
 
+![Screenshot of the program GUI](https://github.com/user-attachments/assets/03a8327a-43cb-4671-a487-c00fb5cebaf0)
+
 ## Features
 
 - **Graphical User Interface (GUI):** Intuitive interface for easy operation without command-line interactions.
@@ -12,10 +14,6 @@
 - **Project Relative Paths:** Ensure project portability by setting 3D model paths relative to the project directory.
 - **Debug Mode:** Enable detailed error messages for troubleshooting.
 - **Tooltips:** Hover over elements for additional information and guidance.
-
-## Screenshot
-
-![Screenshot of the program GUI](https://github.com/user-attachments/assets/03a8327a-43cb-4671-a487-c00fb5cebaf0)
 
 ## Install Dependency
 
