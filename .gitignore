@@ -2,3 +2,6 @@ build
 dist
 easyeda2kicad_gui.spec
 easyeda2kicad_gui.exe
+__pycache__/
+*.pyc
+.easyeda_cache/

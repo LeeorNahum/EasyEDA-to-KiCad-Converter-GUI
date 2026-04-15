@@ -4,7 +4,16 @@ import tkinter.font as tkFont
 import subprocess
 from pathlib import Path
 import os
+import re
 import sys  # Ensure sys is imported
+import threading
+from importlib import metadata
+
+MINIMUM_EASYEDA2KICAD_VERSION = (1, 0, 0)
+MINIMUM_EASYEDA2KICAD_VERSION_STR = ".".join(
+    str(part) for part in MINIMUM_EASYEDA2KICAD_VERSION
+)
+LOOKUP_DEBOUNCE_MS = 500
 
 # Define resource_path
 def resource_path(relative_path):
@@ -149,15 +158,344 @@ class PlaceholderEntry(tk.Entry):
         elif state == 'normal':
             if self.placeholder_active:
                 self.clear_placeholder()
-            elif not self.textvariable.get() and not self.focus_get() == self:
+            if not self.textvariable.get() and not self.focus_get() == self:
                 self.put_placeholder()
+
+
+def parse_version(version_string):
+    parts = []
+    for part in version_string.split("."):
+        digits = ""
+        for char in part:
+            if char.isdigit():
+                digits += char
+            else:
+                break
+        parts.append(int(digits) if digits else 0)
+
+    while len(parts) < 3:
+        parts.append(0)
+
+    return tuple(parts[:3])
+
+
+def get_cli_version():
+    try:
+        return metadata.version("easyeda2kicad")
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def get_default_output_folder():
+    return Path.home() / "Documents" / "Kicad" / "easyeda2kicad"
+
+
+def sanitize_library_name(name):
+    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name.strip())
+    sanitized = re.sub(r"\s+", "_", sanitized)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("._ ")
+    return sanitized or "easyeda2kicad"
+
+
+def get_suggested_library_name(lcsc_id, title="", manufacturer_part=""):
+    preferred_name = manufacturer_part or title or lcsc_id or "easyeda2kicad"
+    if lcsc_id and lcsc_id not in preferred_name:
+        preferred_name = f"{preferred_name}_{lcsc_id}"
+    return sanitize_library_name(preferred_name)
+
+
+def get_auto_library_name():
+    lcsc_id = lcsc_entry.get_real_text().strip().upper()
+    if not lcsc_id:
+        return ""
+    if (
+        part_metadata.get("lcsc_id") == lcsc_id
+        and part_metadata.get("library_name")
+    ):
+        return part_metadata["library_name"]
+    return get_suggested_library_name(lcsc_id)
+
+
+def get_effective_library_name():
+    if destination_mode_var.get() == "single_part":
+        return get_auto_library_name()
+    library_name = library_name_entry.get_real_text().strip()
+    if not library_name:
+        return ""
+    return sanitize_library_name(library_name)
+
+
+def get_base_output_path():
+    output_path = output_entry.get_real_text().strip()
+    if output_path:
+        return Path(output_path)
+    return get_default_output_folder()
+
+
+def get_output_target():
+    base_output_path = get_base_output_path()
+    library_name = get_effective_library_name()
+    if not library_name:
+        return None
+
+    if destination_mode_var.get() == "single_part":
+        return base_output_path / library_name / library_name
+
+    return base_output_path / library_name
+
+
+def set_part_status(message, color="dim gray"):
+    part_info_var.set(message)
+    if "part_info_label" in globals():
+        part_info_label.config(fg=color)
+
+
+def set_library_name_value(value):
+    global library_name_internal_update
+    library_name_internal_update = True
+    library_name_var.set(value)
+    library_name_internal_update = False
+
+
+def apply_auto_library_name(force=False):
+    global last_auto_library_name, custom_library_name_dirty
+    suggested_name = get_auto_library_name()
+    current_value = library_name_entry.get_real_text().strip()
+
+    if force or not current_value or not custom_library_name_dirty or current_value == last_auto_library_name:
+        last_auto_library_name = suggested_name
+        set_library_name_value(suggested_name)
+        if destination_mode_var.get() == "single_part":
+            custom_library_name_dirty = False
+
+
+def refresh_library_name_controls():
+    if destination_mode_var.get() == "single_part":
+        library_name_label.config(text="Library Name (Auto)")
+        apply_auto_library_name(force=True)
+        library_name_entry.set_state('disabled')
+    else:
+        library_name_label.config(text="Library Name")
+        library_name_entry.set_state('normal')
+        if not library_name_entry.get_real_text().strip():
+            apply_auto_library_name(force=True)
+
+
+def update_destination_preview(*args):
+    output_target = get_output_target()
+    if output_target:
+        destination_preview_var.set(f"Destination: {output_target}")
+    else:
+        destination_preview_var.set("Destination: uses the CLI default library path.")
+
+
+def build_part_metadata(cad_data, lcsc_id):
+    data_str = cad_data.get("dataStr") or {}
+    head = data_str.get("head") or {}
+    component_parameters = head.get("c_para") or {}
+
+    title = (
+        cad_data.get("title")
+        or component_parameters.get("Manufacturer Part")
+        or component_parameters.get("name")
+        or lcsc_id
+    )
+    manufacturer = component_parameters.get("Manufacturer") or ""
+    package = component_parameters.get("package") or ""
+    part_class = component_parameters.get("JLCPCB Part Class") or ""
+    library_name = get_suggested_library_name(
+        lcsc_id,
+        title=title,
+        manufacturer_part=component_parameters.get("Manufacturer Part") or "",
+    )
+
+    return {
+        "found": True,
+        "lcsc_id": lcsc_id,
+        "title": title,
+        "manufacturer": manufacturer,
+        "package": package,
+        "part_class": part_class,
+        "library_name": library_name,
+    }
+
+
+def fetch_part_metadata_worker(lcsc_id, request_id):
+    cli_version = get_cli_version()
+    if cli_version is None or parse_version(cli_version) < MINIMUM_EASYEDA2KICAD_VERSION:
+        result = {
+            "found": False,
+            "lcsc_id": lcsc_id,
+            "message": "Install or upgrade easyeda2kicad to auto-detect part details.",
+        }
+    else:
+        try:
+            from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
+
+            cad_data = EasyedaApi(use_cache=True).get_cad_data_of_component(lcsc_id)
+            if cad_data:
+                result = build_part_metadata(cad_data, lcsc_id)
+            else:
+                result = {
+                    "found": False,
+                    "lcsc_id": lcsc_id,
+                    "message": "Could not fetch part details right now. The conversion can still run.",
+                }
+        except Exception as exc:
+            result = {
+                "found": False,
+                "lcsc_id": lcsc_id,
+                "message": f"Part lookup failed: {exc}",
+            }
+
+    root.after(0, lambda: apply_part_metadata(request_id, result))
+
+
+def apply_part_metadata(request_id, result):
+    global part_metadata
+
+    if request_id != part_lookup_request_id:
+        return
+
+    part_metadata = result
+    if result.get("found"):
+        details = [result["title"]]
+        for extra in (result.get("manufacturer"), result.get("package"), result.get("part_class")):
+            if extra:
+                details.append(extra)
+        set_part_status("Detected: " + " | ".join(details), "dark green")
+        apply_auto_library_name(force=destination_mode_var.get() == "single_part")
+    else:
+        set_part_status(result.get("message", "Part details unavailable."), "dark goldenrod")
+        if destination_mode_var.get() == "single_part":
+            apply_auto_library_name(force=True)
+
+    refresh_library_name_controls()
+    update_destination_preview()
+    validate_inputs()
+    update_command_display()
+
+
+def schedule_part_lookup(*args):
+    global part_lookup_after_id
+
+    lcsc_id = lcsc_entry.get_real_text().strip().upper()
+    if part_lookup_after_id is not None:
+        root.after_cancel(part_lookup_after_id)
+        part_lookup_after_id = None
+
+    if not lcsc_id:
+        set_part_status("Type an LCSC part number to auto-detect the part name.", "dim gray")
+        update_destination_preview()
+        return
+
+    if not re.fullmatch(r"C\d+", lcsc_id):
+        set_part_status("Enter a full LCSC part number like C209903.", "dim gray")
+        update_destination_preview()
+        return
+
+    set_part_status("Looking up part details...", "dim gray")
+    part_lookup_after_id = root.after(
+        LOOKUP_DEBOUNCE_MS,
+        lambda captured_id=lcsc_id: start_part_lookup(captured_id),
+    )
+
+
+def start_part_lookup(lcsc_id):
+    global part_lookup_after_id, part_lookup_request_id
+
+    part_lookup_after_id = None
+    part_lookup_request_id += 1
+    request_id = part_lookup_request_id
+
+    lookup_thread = threading.Thread(
+        target=fetch_part_metadata_worker,
+        args=(lcsc_id, request_id),
+        daemon=True,
+    )
+    lookup_thread.start()
+
+
+def on_library_name_change(*args):
+    global custom_library_name_dirty
+
+    if library_name_internal_update or destination_mode_var.get() == "single_part":
+        return
+
+    current_value = library_name_entry.get_real_text().strip()
+    if not current_value:
+        custom_library_name_dirty = False
+        return
+
+    custom_library_name_dirty = current_value != last_auto_library_name
+
+
+def on_destination_mode_change(*args):
+    refresh_library_name_controls()
+    update_destination_preview()
+    validate_inputs()
+    update_command_display()
+
+
+def build_command():
+    lcsc_id = lcsc_entry.get_real_text().strip()
+
+    full = full_var.get()
+    symbol = symbol_var.get()
+    footprint = footprint_var.get()
+    model3d = model3d_var.get()
+    overwrite = overwrite_var.get()
+    v5 = v5_var.get()
+    project_relative = project_relative_var.get()
+    debug = debug_var.get()
+
+    command = ["easyeda2kicad"]
+
+    if lcsc_id:
+        command.extend(["--lcsc_id", lcsc_id])
+
+    if full:
+        command.append("--full")
+    else:
+        if symbol:
+            command.append("--symbol")
+        if footprint:
+            command.append("--footprint")
+        if model3d:
+            command.append("--3d")
+
+    output_target = get_output_target()
+    if output_target:
+        command.extend(["--output", str(output_target)])
+
+    if overwrite:
+        command.append("--overwrite")
+    if v5:
+        command.append("--v5")
+    if project_relative:
+        command.append("--project-relative")
+    if debug:
+        command.append("--debug")
+
+    return command
+
+
+def format_command(command):
+    return ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in command)
+
+
+def get_command_output(result):
+    return "\n".join(
+        part.strip()
+        for part in (result.stdout, result.stderr)
+        if part and part.strip()
+    )
 
 def run_command():
     # Collect options
     lcsc_id = lcsc_entry.get_real_text().strip()
     output_path = output_entry.get_real_text().strip()
-    library_name = library_name_entry.get_real_text().strip()
-    create_folder = create_folder_var.get()
+    library_name = get_effective_library_name()
 
     # Get the state of the checkbuttons
     full = full_var.get()
@@ -182,48 +520,41 @@ def run_command():
         messagebox.showerror("Error", "Project-relative option requires an Output Folder.")
         return
 
+    cli_version = get_cli_version()
+    if cli_version is None:
+        messagebox.showerror(
+            "Error",
+            "easyeda2kicad is not installed.\n\n"
+            "Install it with:\npython -m pip install --upgrade easyeda2kicad",
+        )
+        return
+
+    if parse_version(cli_version) < MINIMUM_EASYEDA2KICAD_VERSION:
+        messagebox.showerror(
+            "Error",
+            f"easyeda2kicad {cli_version} is too old for this GUI.\n\n"
+            f"Please upgrade to {MINIMUM_EASYEDA2KICAD_VERSION_STR} or later:\n"
+            "python -m pip install --upgrade easyeda2kicad",
+        )
+        return
+
+    if output_path and not Path(output_path).is_dir():
+        messagebox.showerror("Error", "Output Folder must already exist.")
+        return
+
+    if not library_name:
+        messagebox.showerror("Error", "A library name could not be determined.")
+        return
+
+    output_target = get_output_target()
+    if output_target:
+        output_target.parent.mkdir(parents=True, exist_ok=True)
+
     # Build the command
-    command = ["easyeda2kicad"]
-
-    command.extend(["--lcsc_id", lcsc_id])
-
-    if full:
-        command.append("--full")
-    else:
-        if symbol:
-            command.append("--symbol")
-        if footprint:
-            command.append("--footprint")
-        if model3d:
-            command.append("--3d")
-
-    # Handle output path and library name
-    if output_path:
-        # If Library Name is provided, construct the output path
-        if library_name:
-            base_output_path = Path(output_path)
-            if create_folder:
-                full_output_path = base_output_path / library_name / library_name
-            else:
-                full_output_path = base_output_path / library_name
-            command.extend(["--output", str(full_output_path)])
-        else:
-            command.extend(["--output", output_path])
-    else:
-        # Output path is optional; if not provided, the script uses the default path
-        pass
-
-    if overwrite:
-        command.append("--overwrite")
-    if v5:
-        command.append("--v5")
-    if project_relative:
-        command.append("--project-relative")
-    if debug:
-        command.append("--debug")
+    command = build_command()
 
     # Format the command string with quotes if necessary
-    command_str = ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in command)
+    command_str = format_command(command)
 
     # Display the command in the command display box
     command_display.config(state='normal')
@@ -236,19 +567,21 @@ def run_command():
         print("Running command:", ' '.join(command))
         result = subprocess.run(command, capture_output=True, text=True, shell=False)
         if result.returncode != 0:
-            # Show error message with stderr
-            error_message = f"An error occurred:\n{result.stderr}"
-            if debug:
-                # Include detailed stderr in the popup
-                messagebox.showerror("Error", error_message)
+            command_output = get_command_output(result)
+            if command_output:
+                messagebox.showerror("Error", f"Conversion failed:\n\n{command_output}")
             else:
-                # Show a simplified error message
-                messagebox.showerror("Error", "An error occurred during the conversion. Please check your inputs and try again.")
+                messagebox.showerror(
+                    "Error",
+                    "An error occurred during the conversion. Please check your inputs and try again.",
+                )
         else:
             # Show success message
             success_message = "Conversion completed successfully."
             if project_relative:
                 success_message += "\nNote: 3D model paths are set relative to the project directory (${KIPRJMOD})."
+            if output_target:
+                success_message += f"\nSaved under: {output_target}"
             messagebox.showinfo("Success", success_message)
     except FileNotFoundError:
         messagebox.showerror("Error", "Error: 'easyeda2kicad' command not found. Ensure it is installed and added to your PATH.")
@@ -284,62 +617,10 @@ def browse_output():
         update_command_display()
 
 def update_command_display(*args):
-    # Collect options
-    lcsc_id = lcsc_entry.get_real_text().strip()
-    output_path = output_entry.get_real_text().strip()
-    library_name = library_name_entry.get_real_text().strip()
-    create_folder = create_folder_var.get()
-
-    # Get the state of the checkbuttons
-    full = full_var.get()
-    symbol = symbol_var.get()
-    footprint = footprint_var.get()
-    model3d = model3d_var.get()
-    overwrite = overwrite_var.get()
-    v5 = v5_var.get()
-    project_relative = project_relative_var.get()
-    debug = debug_var.get()
-
-    # Build the command
-    command = ["easyeda2kicad"]
-
-    if lcsc_id:
-        command.extend(["--lcsc_id", lcsc_id])
-
-    if full:
-        command.append("--full")
-    else:
-        if symbol:
-            command.append("--symbol")
-        if footprint:
-            command.append("--footprint")
-        if model3d:
-            command.append("--3d")
-
-    if output_path:
-        if library_name:
-            base_output_path = Path(output_path)
-            if create_folder:
-                full_output_path = base_output_path / library_name / library_name
-            else:
-                full_output_path = base_output_path / library_name
-            command.extend(["--output", str(full_output_path)])
-        else:
-            command.extend(["--output", output_path])
-    else:
-        pass
-
-    if overwrite:
-        command.append("--overwrite")
-    if v5:
-        command.append("--v5")
-    if project_relative:
-        command.append("--project-relative")
-    if debug:
-        command.append("--debug")
+    command = build_command()
 
     # Format the command string with quotes if necessary
-    command_str = ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in command)
+    command_str = format_command(command)
 
     # Update the command display box
     command_display.config(state='normal')
@@ -352,10 +633,22 @@ def validate_inputs(*args):
 
     lcsc_id = lcsc_entry.get_real_text().strip()
     output_path = output_entry.get_real_text().strip()
-    library_name = library_name_entry.get_real_text().strip()
+    library_name = get_effective_library_name()
 
     if not lcsc_id:
         errors.append("LCSC Part # is required.")
+
+    cli_version = get_cli_version()
+    if cli_version is None:
+        errors.append("easyeda2kicad is not installed.")
+    elif parse_version(cli_version) < MINIMUM_EASYEDA2KICAD_VERSION:
+        errors.append(
+            f"easyeda2kicad {cli_version} is too old. Upgrade to "
+            f"{MINIMUM_EASYEDA2KICAD_VERSION_STR}+."
+        )
+
+    if output_path and not Path(output_path).is_dir():
+        errors.append("Output Folder must already exist.")
 
     # Check options
     full = full_var.get()
@@ -371,6 +664,12 @@ def validate_inputs(*args):
     if project_relative and not output_path:
         errors.append("Project-relative option requires an Output Folder.")
 
+    if not library_name:
+        if destination_mode_var.get() == "single_part":
+            errors.append("Waiting for a valid LCSC part number to derive the library name.")
+        else:
+            errors.append("Library Name is required in Custom Library mode.")
+
     if errors:
         run_button.config(state='disabled', bg='SystemButtonFace', fg='SystemButtonText', text='Run')
         run_button_tooltip.text = "Cannot run due to the following errors:\n- " + "\n- ".join(errors)
@@ -378,17 +677,12 @@ def validate_inputs(*args):
         run_button.config(state='normal', bg='green', fg='white', text='Run')
         run_button_tooltip.text = "Execute the conversion with the selected options."
 
-    # Enable/disable Library Name, Create Folder, and Project Relative based on Output Path
+    refresh_library_name_controls()
+
     if output_path:
-        library_name_entry.set_state('normal')
-        create_folder_check.config(state='normal')
         project_relative_check.config(state='normal')
     else:
-        library_name_entry.set_state('disabled')
-        create_folder_check.config(state='disabled')
         project_relative_check.config(state='disabled')
-        library_name_var.set('')
-        create_folder_var.set(False)
         project_relative_var.set(False)
 
 # Create the main window
@@ -407,15 +701,24 @@ except Exception as e:
 lcsc_id_var = tk.StringVar()
 output_var = tk.StringVar()
 library_name_var = tk.StringVar()
+destination_mode_var = tk.StringVar(value="single_part")
+part_info_var = tk.StringVar(value="Type an LCSC part number to auto-detect the part name.")
+destination_preview_var = tk.StringVar()
 symbol_var = tk.BooleanVar()
 footprint_var = tk.BooleanVar()
 model3d_var = tk.BooleanVar()
-full_var = tk.BooleanVar()
+full_var = tk.BooleanVar(value=True)
 overwrite_var = tk.BooleanVar()
 v5_var = tk.BooleanVar()
 project_relative_var = tk.BooleanVar()
-debug_var = tk.BooleanVar()
-create_folder_var = tk.BooleanVar()
+debug_var = tk.BooleanVar(value=True)
+
+part_metadata = {"found": False, "lcsc_id": "", "library_name": ""}
+part_lookup_after_id = None
+part_lookup_request_id = 0
+library_name_internal_update = False
+custom_library_name_dirty = False
+last_auto_library_name = ""
 
 # Create the main frame and configure grid columns
 main_frame = tk.Frame(root)
@@ -433,35 +736,79 @@ lcsc_entry = PlaceholderEntry(main_frame, placeholder="LCSC Part #", textvariabl
 lcsc_entry.grid(row=0, column=0, columnspan=2, sticky="ew", **padding_options)
 ToolTip(lcsc_entry, "Enter the LCSC Part Number of the component (e.g., C5267399).")
 
+part_info_label = tk.Label(
+    main_frame,
+    textvariable=part_info_var,
+    anchor="w",
+    justify="left",
+    fg="dim gray",
+    wraplength=470,
+)
+part_info_label.grid(row=1, column=0, columnspan=2, sticky="ew", **padding_options)
+
 # Output Folder and Browse Button
 output_frame = tk.Frame(main_frame)
-output_frame.grid(row=1, column=0, columnspan=2, sticky="ew", **padding_options)
+output_frame.grid(row=2, column=0, columnspan=2, sticky="ew", **padding_options)
 output_frame.grid_columnconfigure(0, weight=1)
 
 output_entry = PlaceholderEntry(output_frame, placeholder="Output Folder (Optional)", textvariable=output_var)
 output_entry.grid(row=0, column=0, sticky="ew")
-ToolTip(output_entry, "Select the base folder where the library will be saved. If not specified, a default folder will be used.")
+ToolTip(output_entry, "Select the base folder where the library will be saved. Leave it blank to use Documents/Kicad/easyeda2kicad.")
 
 browse_button = tk.Button(output_frame, text="Browse", command=browse_output)
 browse_button.grid(row=0, column=1, padx=(5,0))
 ToolTip(browse_button, "Click to browse and select the output folder.")
 
-# Library Name and Create Folder Checkbox
+# Destination mode
+destination_frame = tk.LabelFrame(main_frame, text="Destination")
+destination_frame.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+destination_frame.grid_columnconfigure((0, 1), weight=1)
+
+single_part_radio = tk.Radiobutton(
+    destination_frame,
+    text="Single Part Folder",
+    variable=destination_mode_var,
+    value="single_part",
+    command=on_destination_mode_change,
+)
+single_part_radio.grid(row=0, column=0, padx=5, sticky="w")
+ToolTip(single_part_radio, "Best default for one-off imports. Uses the detected part name and creates a dedicated folder for that part.")
+
+custom_library_radio = tk.Radiobutton(
+    destination_frame,
+    text="Custom Library",
+    variable=destination_mode_var,
+    value="custom_library",
+    command=on_destination_mode_change,
+)
+custom_library_radio.grid(row=0, column=1, padx=5, sticky="w")
+ToolTip(custom_library_radio, "Use this when you want to merge parts into one library name instead of one folder per part.")
+
+# Library Name
 library_frame = tk.Frame(main_frame)
-library_frame.grid(row=2, column=0, columnspan=2, sticky="ew", **padding_options)
-library_frame.grid_columnconfigure(0, weight=1)
+library_frame.grid(row=4, column=0, columnspan=2, sticky="ew", **padding_options)
+library_frame.grid_columnconfigure(1, weight=1)
+
+library_name_label = tk.Label(library_frame, text="Library Name (Auto)")
+library_name_label.grid(row=0, column=0, padx=(0, 5), sticky="w")
 
 library_name_entry = PlaceholderEntry(library_frame, placeholder="Library Name", textvariable=library_name_var, state='disabled')
-library_name_entry.grid(row=0, column=0, sticky="ew")
-ToolTip(library_name_entry, "Enter the name of the library (e.g., MyLib). This is optional unless Output Folder is specified.")
+library_name_entry.grid(row=0, column=1, sticky="ew")
+ToolTip(library_name_entry, "In Single Part Folder mode this is auto-filled from the detected part. In Custom Library mode you can override it.")
 
-create_folder_check = tk.Checkbutton(library_frame, text="Create Folder", variable=create_folder_var, state='disabled', command=validate_inputs)
-create_folder_check.grid(row=0, column=1, padx=(5,0))
-ToolTip(create_folder_check, "Check to create a new folder named after the library within the selected Output Folder.")
+destination_preview_label = tk.Label(
+    main_frame,
+    textvariable=destination_preview_var,
+    anchor="w",
+    justify="left",
+    fg="dim gray",
+    wraplength=470,
+)
+destination_preview_label.grid(row=5, column=0, columnspan=2, sticky="ew", **padding_options)
 
 # Options: Full, Symbol, Footprint, 3D Model
 options_frame = tk.LabelFrame(main_frame, text="Options")
-options_frame.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+options_frame.grid(row=6, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 options_frame.grid_columnconfigure((0,1,2,3), weight=1)
 
 full_check = tk.Checkbutton(options_frame, text="Full", variable=full_var, command=on_full_toggle)
@@ -482,7 +829,7 @@ ToolTip(model3d_check, "Generate the 3D model for the component.")
 
 # Options: Overwrite, Project Relative, KiCad v5, Debug
 options_frame2 = tk.LabelFrame(main_frame, text="Advanced Options")
-options_frame2.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+options_frame2.grid(row=7, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 options_frame2.grid_columnconfigure((0,1,2,3), weight=1)
 
 overwrite_check = tk.Checkbutton(options_frame2, text="Overwrite", variable=overwrite_var, command=validate_inputs)
@@ -499,24 +846,24 @@ ToolTip(v5_check, "Convert the library to legacy format for KiCad version 5.x.")
 
 debug_check = tk.Checkbutton(options_frame2, text="Debug", variable=debug_var, command=validate_inputs)
 debug_check.grid(row=0, column=3, padx=5, sticky="w")
-ToolTip(debug_check, "Enable debug mode to display detailed error messages. Useful for troubleshooting.")
+ToolTip(debug_check, "Enabled by default so API and 3D-model failures show the actual CLI output.")
 
 # Run Button
 run_button = tk.Button(main_frame, text="Run", command=run_command)
-run_button.grid(row=5, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+run_button.grid(row=8, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 run_button_tooltip = ToolTip(run_button, "Execute the conversion with the selected options.")
 
 # Command Display (within main_frame)
 small_font = tkFont.Font(size=8)
 command_display = tk.Text(main_frame, height=2, state='disabled', bg="#f0f0f0", wrap='word', font=small_font)
-command_display.grid(row=6, column=0, columnspan=2, padx=5, pady=(3,5), sticky="ew")
-ToolTip(command_display, "Displays the command being executed.")
+command_display.grid(row=9, column=0, columnspan=2, padx=5, pady=(3,5), sticky="ew")
+ToolTip(command_display, "Shows the exact CLI command the GUI is about to run.")
 
 # Trace variables for live command display and input validation
 variables_to_trace = [
-    lcsc_id_var,
     output_var,
     library_name_var,
+    destination_mode_var,
     full_var,
     symbol_var,
     footprint_var,
@@ -525,16 +872,21 @@ variables_to_trace = [
     overwrite_var,
     v5_var,
     debug_var,
-    create_folder_var,
 ]
 
 for var in variables_to_trace:
     var.trace_add('write', update_command_display)
     var.trace_add('write', validate_inputs)
 
-# Call validate_inputs initially to set the correct state of the Run button
-validate_inputs()
-update_command_display()
+lcsc_id_var.trace_add('write', schedule_part_lookup)
+lcsc_id_var.trace_add('write', update_command_display)
+lcsc_id_var.trace_add('write', validate_inputs)
+library_name_var.trace_add('write', on_library_name_change)
+
+# Call on_full_toggle initially so the default Full state is reflected in the UI
+on_full_toggle()
+schedule_part_lookup()
+update_destination_preview()
 
 # Start the main loop
 root.mainloop()
