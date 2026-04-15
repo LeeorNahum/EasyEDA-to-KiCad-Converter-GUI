@@ -244,6 +244,13 @@ def get_output_target():
     return base_output_path / library_name
 
 
+def get_command_working_directory():
+    output_path = output_entry.get_real_text().strip()
+    if project_relative_var.get() and output_path:
+        return str(Path(output_path))
+    return None
+
+
 def set_part_status(message, color="dim gray"):
     part_info_var.set(message)
     if "part_info_label" in globals():
@@ -271,20 +278,22 @@ def apply_auto_library_name(force=False):
 
 def refresh_library_name_controls():
     if destination_mode_var.get() == "single_part":
-        library_name_label.config(text="Library Name (Auto)")
-        apply_auto_library_name(force=True)
-        library_name_entry.set_state('disabled')
+        library_name_label.config(text="Library Name (Suggested)")
+        apply_auto_library_name(force=False)
     else:
         library_name_label.config(text="Library Name")
-        library_name_entry.set_state('normal')
         if not library_name_entry.get_real_text().strip():
             apply_auto_library_name(force=True)
+    library_name_entry.set_state('normal')
 
 
 def update_destination_preview(*args):
     output_target = get_output_target()
     if output_target:
-        destination_preview_var.set(f"Destination: {output_target}")
+        preview = f"Destination: {output_target}"
+        if project_relative_var.get() and output_entry.get_real_text().strip():
+            preview += " | 3D path stored relative to ${KIPRJMOD}"
+        destination_preview_var.set(preview)
     else:
         destination_preview_var.set("Destination: uses the CLI default library path.")
 
@@ -364,11 +373,11 @@ def apply_part_metadata(request_id, result):
             if extra:
                 details.append(extra)
         set_part_status("Detected: " + " | ".join(details), "dark green")
-        apply_auto_library_name(force=destination_mode_var.get() == "single_part")
+        apply_auto_library_name(force=False)
     else:
         set_part_status(result.get("message", "Part details unavailable."), "dark goldenrod")
         if destination_mode_var.get() == "single_part":
-            apply_auto_library_name(force=True)
+            apply_auto_library_name(force=False)
 
     refresh_library_name_controls()
     update_destination_preview()
@@ -419,7 +428,7 @@ def start_part_lookup(lcsc_id):
 def on_library_name_change(*args):
     global custom_library_name_dirty
 
-    if library_name_internal_update or destination_mode_var.get() == "single_part":
+    if library_name_internal_update:
         return
 
     current_value = library_name_entry.get_real_text().strip()
@@ -439,6 +448,7 @@ def on_destination_mode_change(*args):
 
 def build_command():
     lcsc_id = lcsc_entry.get_real_text().strip()
+    output_path = output_entry.get_real_text().strip()
 
     full = full_var.get()
     symbol = symbol_var.get()
@@ -472,7 +482,7 @@ def build_command():
         command.append("--overwrite")
     if v5:
         command.append("--v5")
-    if project_relative:
+    if project_relative and output_path:
         command.append("--project-relative")
     if debug:
         command.append("--debug")
@@ -504,7 +514,7 @@ def run_command():
     model3d = model3d_var.get()
     overwrite = overwrite_var.get()
     v5 = v5_var.get()
-    project_relative = project_relative_var.get()
+    project_relative = project_relative_var.get() and bool(output_path)
     debug = debug_var.get()
 
     # Validate LCSC Part #
@@ -565,7 +575,13 @@ def run_command():
     # Run the command
     try:
         print("Running command:", ' '.join(command))
-        result = subprocess.run(command, capture_output=True, text=True, shell=False)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            shell=False,
+            cwd=get_command_working_directory(),
+        )
         if result.returncode != 0:
             command_output = get_command_output(result)
             if command_output:
@@ -634,7 +650,6 @@ def validate_inputs(*args):
     lcsc_id = lcsc_entry.get_real_text().strip()
     output_path = output_entry.get_real_text().strip()
     library_name = get_effective_library_name()
-
     if not lcsc_id:
         errors.append("LCSC Part # is required.")
 
@@ -659,11 +674,6 @@ def validate_inputs(*args):
     if not full and not (symbol or footprint or model3d):
         errors.append("Select Full or at least one of Symbol, Footprint, or 3D Model.")
 
-    # Check project-relative association
-    project_relative = project_relative_var.get()
-    if project_relative and not output_path:
-        errors.append("Project-relative option requires an Output Folder.")
-
     if not library_name:
         if destination_mode_var.get() == "single_part":
             errors.append("Waiting for a valid LCSC part number to derive the library name.")
@@ -683,7 +693,6 @@ def validate_inputs(*args):
         project_relative_check.config(state='normal')
     else:
         project_relative_check.config(state='disabled')
-        project_relative_var.set(False)
 
 # Create the main window
 root = tk.Tk()
@@ -710,7 +719,7 @@ model3d_var = tk.BooleanVar()
 full_var = tk.BooleanVar(value=True)
 overwrite_var = tk.BooleanVar()
 v5_var = tk.BooleanVar()
-project_relative_var = tk.BooleanVar()
+project_relative_var = tk.BooleanVar(value=True)
 debug_var = tk.BooleanVar(value=True)
 
 part_metadata = {"found": False, "lcsc_id": "", "library_name": ""}
@@ -794,7 +803,7 @@ library_name_label.grid(row=0, column=0, padx=(0, 5), sticky="w")
 
 library_name_entry = PlaceholderEntry(library_frame, placeholder="Library Name", textvariable=library_name_var, state='disabled')
 library_name_entry.grid(row=0, column=1, sticky="ew")
-ToolTip(library_name_entry, "In Single Part Folder mode this is auto-filled from the detected part. In Custom Library mode you can override it.")
+ToolTip(library_name_entry, "Single Part Folder starts with an auto-suggested name, but you can still edit it. Custom Library mode also lets you choose the name manually.")
 
 destination_preview_label = tk.Label(
     main_frame,
@@ -838,7 +847,7 @@ ToolTip(overwrite_check, "Overwrite existing library files if they already exist
 
 project_relative_check = tk.Checkbutton(options_frame2, text="Project Relative", variable=project_relative_var, command=validate_inputs, state='disabled')
 project_relative_check.grid(row=0, column=1, padx=5, sticky="w")
-ToolTip(project_relative_check, "Set the 3D model paths to be relative to the project directory (${KIPRJMOD}), ensuring project portability. Requires an Output Folder.")
+ToolTip(project_relative_check, "When enabled, the Output Folder is treated as the ${KIPRJMOD} base for 3D model paths. Best when the library is saved inside your KiCad project folder.")
 
 v5_check = tk.Checkbutton(options_frame2, text="KiCad v5", variable=v5_var, command=validate_inputs)
 v5_check.grid(row=0, column=2, padx=5, sticky="w")

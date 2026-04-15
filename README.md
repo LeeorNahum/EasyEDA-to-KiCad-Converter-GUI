@@ -48,8 +48,9 @@ The GUI expects a current `easyeda2kicad` release. Older versions such as `0.8.0
    - **Custom Library:** Lets you choose a reusable library name when you want to merge parts.
 
 4. **Library Name:**
-   - In **Single Part Folder** mode, the name is auto-filled.
-   - In **Custom Library** mode, you can edit it manually.
+   - In **Single Part Folder** mode, the name starts with an auto-detected suggestion.
+   - You can still edit it manually if you want a cleaner custom name.
+   - In **Custom Library** mode, you can also edit it manually.
 
 5. **Options:**
    - **Full:** Generates Symbol, Footprint, and 3D Model. Enabled by default.
@@ -59,7 +60,7 @@ The GUI expects a current `easyeda2kicad` release. Older versions such as `0.8.0
 
 6. **Advanced Options:**
    - **Overwrite:** Overwrite existing library files if they already exist.
-   - **Project Relative:** Set 3D model paths relative to the project directory for portability. Requires an Output Folder.
+   - **Project Relative:** Enabled by default once an Output Folder is set. The Output Folder is treated as the `${KIPRJMOD}` base for 3D model paths, which keeps project-local libraries portable.
    - **KiCad v5:** Convert the library to legacy format for KiCad version 5.x.
    - **Debug:** Enabled by default so conversion failures show the real CLI error in a popup.
 
