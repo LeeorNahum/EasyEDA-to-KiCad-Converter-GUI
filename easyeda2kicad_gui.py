@@ -689,11 +689,6 @@ def validate_inputs(*args):
 
     refresh_library_name_controls()
 
-    if output_path:
-        project_relative_check.config(state='normal')
-    else:
-        project_relative_check.config(state='disabled')
-
 # Create the main window
 root = tk.Tk()
 root.title("EasyEDA to KiCad Converter GUI")
@@ -845,9 +840,9 @@ overwrite_check = tk.Checkbutton(options_frame2, text="Overwrite", variable=over
 overwrite_check.grid(row=0, column=0, padx=5, sticky="w")
 ToolTip(overwrite_check, "Overwrite existing library files if they already exist.")
 
-project_relative_check = tk.Checkbutton(options_frame2, text="Project Relative", variable=project_relative_var, command=validate_inputs, state='disabled')
+project_relative_check = tk.Checkbutton(options_frame2, text="Project Relative", variable=project_relative_var, command=validate_inputs)
 project_relative_check.grid(row=0, column=1, padx=5, sticky="w")
-ToolTip(project_relative_check, "When enabled, the Output Folder is treated as the ${KIPRJMOD} base for 3D model paths. Best when the library is saved inside your KiCad project folder.")
+ToolTip(project_relative_check, "When enabled, the Output Folder is treated as the ${KIPRJMOD} base for 3D model paths. If no Output Folder is set yet, this stays as a preference and will apply once you choose one.")
 
 v5_check = tk.Checkbutton(options_frame2, text="KiCad v5", variable=v5_var, command=validate_inputs)
 v5_check.grid(row=0, column=2, padx=5, sticky="w")
