@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The converter window. The folder picker and file manager are opened by the app's own commands, so no plugin permission is granted to the page.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
