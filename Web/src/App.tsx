@@ -56,6 +56,7 @@ export function App() {
   const [planProblem, setPlanProblem] = useState<Problem | null>(null);
   const [conversion, setConversion] = useState<Conversion>({ state: "idle" });
   const [browsing, setBrowsing] = useState(false);
+  const refocus = useRef<HTMLElement | null>(null);
   const lookupRun = useRef(0);
 
   const part = normalizePart(partText);
@@ -171,6 +172,13 @@ export function App() {
   })();
   const converting = conversion.state === "converting";
 
+  useEffect(() => {
+    if (!converting && refocus.current !== null) {
+      refocus.current.focus();
+      refocus.current = null;
+    }
+  }, [converting]);
+
   // Convert waits for the picker, so a folder chosen late never changes the
   // form under a conversion.
   async function browse() {
@@ -185,6 +193,9 @@ export function App() {
 
   async function convert() {
     if (blocker !== null || converting) return;
+    // The form is disabled while converting, which takes focus from the
+    // field in use. It goes back there once the form is enabled again.
+    refocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setConversion({ state: "converting" });
     try {
       setConversion({ state: "done", report: await convertPart(request) });
