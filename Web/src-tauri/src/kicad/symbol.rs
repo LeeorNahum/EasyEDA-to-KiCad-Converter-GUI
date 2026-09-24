@@ -868,7 +868,9 @@ pub enum Stored {
 }
 
 /// Where `library` stands for a symbol named `name`. `library` must be a
-/// well-formed symbol library.
+/// well-formed symbol library. `write_into_library` appends when this is
+/// `Absent` and replaces when it is `Replaceable`, and must not be called
+/// when it is `Unsafe`.
 pub fn stored(library: &str, name: &str) -> Stored {
     let id = escape(&library_id(name));
     let spans: Vec<_> = super::sexpr::library_symbols(library)
@@ -877,9 +879,6 @@ pub fn stored(library: &str, name: &str) -> Stored {
         .filter(|symbol| symbol.name == id)
         .map(|symbol| symbol.span)
         .collect();
-    if spans.is_empty() {
-        return Stored::Absent;
-    }
     // easyeda2kicad's pattern starts at the newline before the symbol and
     // ends at its closing parenthesis. Every match must be exactly one of
     // the symbols the reader found, and every such symbol must be matched.
@@ -892,10 +891,12 @@ pub fn stored(library: &str, name: &str) -> Stored {
             Some(indent.end()..whole.end())
         })
         .collect();
-    if matched == spans {
-        Stored::Replaceable
-    } else {
-        Stored::Unsafe
+    // The writer replaces whatever the pattern matches, so a match anywhere
+    // else, such as a unit nested inside another symbol, makes it unsafe.
+    match (spans.is_empty(), matched == spans) {
+        (true, true) => Stored::Absent,
+        (false, true) => Stored::Replaceable,
+        (_, false) => Stored::Unsafe,
     }
 }
 
@@ -965,6 +966,10 @@ mod tests {
         let bare = "(kicad_symbol_lib\n  (symbol X\n  )\n)";
         assert_eq!(stored(bare, "X"), Stored::Unsafe);
         assert_eq!(stored(compact, "Y"), Stored::Absent);
+        // A new name that is also a unit nested inside another symbol.
+        let units = "(kicad_symbol_lib\n  (symbol \"X\"\n    (symbol \"X_0_1\"\n    )\n  )\n)";
+        assert_eq!(stored(units, "X"), Stored::Replaceable);
+        assert_eq!(stored(units, "X_0_1"), Stored::Unsafe);
     }
 
     #[test]

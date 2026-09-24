@@ -57,7 +57,15 @@ The app says what failed and what to do next, with the underlying error below it
 
 ## How It Works
 
-The app talks to the EasyEDA API directly and writes the KiCad files itself. The conversion is a line-by-line port of [easyeda2kicad.py](https://github.com/uPesy/easyeda2kicad.py) 1.0.1 by uPesy into Rust, and for the same part it writes the same symbol, footprint, and 3D model text. Files are saved with Unix line endings, as KiCad itself saves them. The app is licensed under the AGPL-3.0, like easyeda2kicad.py. See [`Web/LICENSE`](Web/LICENSE).
+The app talks to the EasyEDA API directly and writes the KiCad files itself. The conversion is a function-by-function port of [easyeda2kicad.py](https://github.com/uPesy/easyeda2kicad.py) 1.0.1 by uPesy into Rust, and for the same part it writes the same symbol, footprint, and 3D model text, with a few corrections:
+
+- Holes EasyEDA marks as unplated stay unplated.
+- Custom-shaped pads keep their exact size, without an extra 0.1 mm outline.
+- Names and text with spaces or quotes are quoted, so KiCad reads them back as written.
+- A part whose data has a missing or broken coordinate is refused instead of written.
+- Converting into an existing library never leaves it half-written or with a symbol twice.
+
+Files use Unix line endings, as KiCad itself writes them. The app is licensed under the AGPL-3.0, like easyeda2kicad.py. See [`Web/LICENSE`](Web/LICENSE).
 
 ## Repository Layout
 
