@@ -397,11 +397,12 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
             pad.width = 0.005;
             pad.height = 0.005;
             pad.orientation = 0.0;
-            // A coordinate without its partner is left out.
+            // A coordinate without its partner reads as NaN, which the
+            // conversion then refuses rather than guess at the shape.
             let path: String = points
-                .chunks_exact(2)
+                .chunks(2)
                 .map(|pair| {
-                    let (x, y) = (pair[0], pair[1]);
+                    let (x, y) = (pair[0], pair.get(1).copied().unwrap_or(f64::NAN));
                     format!(
                         "(xy {} {})",
                         fixed(x - bbox.x - pad.x, 6),
@@ -448,11 +449,12 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
         let points: Vec<f64> = track.points.split_whitespace().map(fp_to_ki).collect();
         let mut i = 0;
         // Each pair of consecutive points is one segment. A coordinate
-        // without its partner ends the track.
-        while i + 3 < points.len() {
+        // without its partner reads as NaN, which the conversion refuses.
+        let at = |index: usize| points.get(index).copied().unwrap_or(f64::NAN);
+        while i + 2 < points.len() {
             out.push_str(&line(
-                (points[i] - bbox.x, points[i + 1] - bbox.y),
-                (points[i + 2] - bbox.x, points[i + 3] - bbox.y),
+                (at(i) - bbox.x, at(i + 1) - bbox.y),
+                (at(i + 2) - bbox.x, at(i + 3) - bbox.y),
                 layers,
                 width,
             ));

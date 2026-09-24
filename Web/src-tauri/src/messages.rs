@@ -9,23 +9,73 @@ use serde::Serialize;
 
 use crate::easyeda::api::FetchError;
 
+/// What a conversion writes, for problems about one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Item {
+    Symbol,
+    Footprint,
+    Model,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     InvalidPartNumber,
-    PartNotFound { lcsc_id: String },
-    EasyedaRefused { status: u16 },
-    EasyedaUnreachable { detail: String },
-    EasyedaFailed { detail: String },
-    NoSymbol { lcsc_id: String },
-    NoFootprint { lcsc_id: String },
+    PartNotFound {
+        lcsc_id: String,
+    },
+    EasyedaRefused {
+        status: u16,
+    },
+    EasyedaUnreachable {
+        detail: String,
+    },
+    EasyedaFailed {
+        detail: String,
+    },
+    NoSymbol {
+        lcsc_id: String,
+    },
+    NoFootprint {
+        lcsc_id: String,
+    },
     NothingSelected,
     LibraryNameMissing,
-    OutputFolderMissing { path: String },
-    AlreadyExists { items: Vec<String> },
-    NotASymbolLibrary { path: String },
-    ReadFailed { path: String, detail: String },
-    WriteFailed { path: String, detail: String },
-    OpenFailed { path: String, detail: String },
+    OutputFolderMissing {
+        path: String,
+    },
+    AlreadyExists {
+        items: Vec<String>,
+    },
+    NotASymbolLibrary {
+        path: String,
+    },
+    LibraryLayout {
+        path: String,
+    },
+    UnreadablePart {
+        lcsc_id: String,
+        item: Item,
+    },
+    DestinationIsFolder {
+        path: String,
+    },
+    ReadFailed {
+        path: String,
+        detail: String,
+    },
+    WriteFailed {
+        path: String,
+        detail: String,
+    },
+    WriteIncomplete {
+        path: String,
+        detail: String,
+        unrestored: Vec<String>,
+    },
+    OpenFailed {
+        path: String,
+        detail: String,
+    },
 }
 
 /// A problem as the window shows it.
@@ -84,12 +134,12 @@ impl Problem {
             ),
             Problem::NoSymbol { lcsc_id } => (
                 "no-symbol",
-                format!("EasyEDA has no schematic symbol for {lcsc_id}. Clear Symbol to convert the rest."),
+                format!("EasyEDA has no schematic symbol for {lcsc_id}. Turn off Symbol to convert the rest."),
                 None,
             ),
             Problem::NoFootprint { lcsc_id } => (
                 "no-footprint",
-                format!("EasyEDA has no footprint for {lcsc_id}. Clear Footprint and 3D model to convert the symbol."),
+                format!("EasyEDA has no footprint for {lcsc_id}. Turn off Footprint and 3D model to convert the symbol."),
                 None,
             ),
             Problem::NothingSelected => (
@@ -121,6 +171,28 @@ impl Problem {
                 format!("{path} is not a KiCad symbol library, so nothing was added to it. Choose another library name."),
                 None,
             ),
+            Problem::LibraryLayout { path } => (
+                "library-layout",
+                format!("{path} already has this symbol, laid out in a way this app cannot safely replace. Open the library in KiCad's Symbol Editor and save it, then convert again."),
+                None,
+            ),
+            Problem::UnreadablePart { lcsc_id, item } => {
+                let (what, switch) = match item {
+                    Item::Symbol => ("symbol", "Symbol"),
+                    Item::Footprint => ("footprint", "Footprint"),
+                    Item::Model => ("3D model", "3D model"),
+                };
+                (
+                    "unreadable-part",
+                    format!("EasyEDA's {what} for {lcsc_id} has a missing or broken coordinate, so nothing was saved. Turn off {switch} to convert the rest."),
+                    None,
+                )
+            }
+            Problem::DestinationIsFolder { path } => (
+                "destination-is-folder",
+                format!("{path} is a folder, so the file that belongs there was not saved. Move or rename that folder, then convert again."),
+                None,
+            ),
             Problem::ReadFailed { path, detail } => (
                 "read-failed",
                 format!("Could not read {path}. Check that the file is not open in another program."),
@@ -129,6 +201,20 @@ impl Problem {
             Problem::WriteFailed { path, detail } => (
                 "write-failed",
                 format!("Could not save {path}. Check that the folder is writable and the file is not open elsewhere."),
+                Some(detail),
+            ),
+            Problem::WriteIncomplete {
+                path,
+                detail,
+                unrestored,
+            } => (
+                "write-incomplete",
+                format!(
+                    "Could not save {path}, and could not put back {} as {} was. Check {} before using the library.",
+                    join_names(&unrestored),
+                    if unrestored.len() == 1 { "it" } else { "they" },
+                    if unrestored.len() == 1 { "it" } else { "them" },
+                ),
                 Some(detail),
             ),
             Problem::OpenFailed { path, detail } => (

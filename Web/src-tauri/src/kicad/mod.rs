@@ -2,6 +2,7 @@
 
 pub mod footprint;
 pub mod model3d;
+pub mod sexpr;
 pub mod symbol;
 
 /// The body of a quoted S-expression string. KiCad reads `\\`, `\"`, and
@@ -22,13 +23,15 @@ pub fn escape(text: &str) -> String {
 }
 
 /// A bare S-expression atom when the text can stand alone, and a quoted
-/// string when it is empty or holds whitespace, a parenthesis, a quote, or a
-/// backslash. Plain names are written exactly as easyeda2kicad writes them.
+/// string when it is empty, holds whitespace, a parenthesis, a quote, or a
+/// backslash, or reads as a number that is not finite. Plain names are
+/// written exactly as easyeda2kicad writes them.
 pub fn atom(text: &str) -> String {
     let needs_quotes = text.is_empty()
         || text
             .chars()
-            .any(|c| c.is_whitespace() || matches!(c, '(' | ')' | '"' | '\\'));
+            .any(|c| c.is_whitespace() || matches!(c, '(' | ')' | '"' | '\\'))
+        || sexpr::is_non_finite(text);
     if needs_quotes {
         format!("\"{}\"", escape(text))
     } else {

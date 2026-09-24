@@ -55,6 +55,7 @@ export function App() {
   const [destination, setDestination] = useState<Destination | null>(null);
   const [planProblem, setPlanProblem] = useState<Problem | null>(null);
   const [conversion, setConversion] = useState<Conversion>({ state: "idle" });
+  const [browsing, setBrowsing] = useState(false);
   const lookupRun = useRef(0);
 
   const part = normalizePart(partText);
@@ -151,6 +152,7 @@ export function App() {
   }, [request]);
 
   const blocker = (() => {
+    if (browsing) return "Choose a folder in the folder picker.";
     if (part === null) return "Enter an LCSC part number to convert.";
     if (lookup.state === "failed" && lookup.problem.code === "part-not-found") {
       return "Check the part number above.";
@@ -169,9 +171,16 @@ export function App() {
   })();
   const converting = conversion.state === "converting";
 
+  // Convert waits for the picker, so a folder chosen late never changes the
+  // form under a conversion.
   async function browse() {
-    const chosen = await chooseFolder(outputFolder || defaultFolder);
-    if (chosen !== null) setOutputFolder(chosen);
+    setBrowsing(true);
+    try {
+      const chosen = await chooseFolder(outputFolder || defaultFolder);
+      if (chosen !== null) setOutputFolder(chosen);
+    } finally {
+      setBrowsing(false);
+    }
   }
 
   async function convert() {

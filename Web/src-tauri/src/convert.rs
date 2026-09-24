@@ -18,8 +18,8 @@ use std::sync::LazyLock;
 use crate::easyeda::api::{Client, FetchError};
 use crate::easyeda::values::{json_text, or_else};
 use crate::easyeda::{footprint as ee_footprint, model3d as ee_model3d, symbol as ee_symbol};
-use crate::kicad::{footprint, model3d, symbol};
-use crate::messages::Problem;
+use crate::kicad::{self, footprint, model3d, sexpr, symbol};
+use crate::messages::{Item, Problem};
 
 /// How the library files are laid out under the output folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -259,14 +259,30 @@ pub async fn convert(
         let ee = ee_symbol::import(component);
         let path = PathBuf::from(&destination.symbol_library);
         let existing = read_library(&path)?;
-        if !request.overwrite
-            && let Some(text) = &existing
-            && symbol::library_contains(text, &ee.info.name)
-        {
-            conflicts.push(format!("the symbol {}", ee.info.name));
+        if let Some((text, stored)) = &existing {
+            let id = kicad::escape(&symbol::library_id(&ee.info.name));
+            if stored.contains(&id) {
+                // A symbol this app would replace, laid out so it cannot be
+                // found to replace, is refused rather than duplicated.
+                if !symbol::library_contains(text, &ee.info.name) {
+                    return Err(Problem::LibraryLayout {
+                        path: destination.symbol_library.clone(),
+                    });
+                }
+                if !request.overwrite {
+                    conflicts.push(format!("the symbol {}", ee.info.name));
+                }
+            }
         }
+        let existing = existing.map(|(text, _)| text);
         let version = symbol::library_version(existing.as_deref());
         let content = symbol::export(&ee, library, version);
+        if sexpr::has_unreadable_number(&content) {
+            return Err(Problem::UnreadablePart {
+                lcsc_id,
+                item: Item::Symbol,
+            });
+        }
         let text = symbol::write_into_library(existing.as_deref(), &ee.info.name, &content)
             .ok_or_else(|| Problem::NotASymbolLibrary {
                 path: destination.symbol_library.clone(),
@@ -289,6 +305,12 @@ pub async fn convert(
             conflicts.push(format!("the footprint {}", footprint::footprint_name(&ee)));
         }
         let text = footprint::export(&ee, &destination.model_reference);
+        if sexpr::has_unreadable_number(&text) {
+            return Err(Problem::UnreadablePart {
+                lcsc_id,
+                item: Item::Footprint,
+            });
+        }
         outputs.push(Output {
             path,
             bytes: text.into_bytes(),
@@ -318,21 +340,37 @@ pub async fn convert(
                         None => notes.push("EasyEDA has no 3D model for this part.".to_string()),
                         Some(obj) => {
                             let step = models.step_model(&model.uuid).await.map_err(fetch)?;
-                            if let Some(wrl) = model3d::to_wrl(&model, &obj) {
+                            let wrl = model3d::to_wrl(&model, &obj);
+                            if wrl.as_deref().is_some_and(model3d::has_unreadable_number) {
+                                return Err(Problem::UnreadablePart {
+                                    lcsc_id,
+                                    item: Item::Model,
+                                });
+                            }
+                            match (&wrl, &step) {
+                                (Some(_), None) => notes.push(
+                                    "EasyEDA has no STEP model for this part, so only the WRL was saved."
+                                        .to_string(),
+                                ),
+                                (None, Some(_)) => notes.push(
+                                    "EasyEDA's model for this part has no shapes KiCad's viewer can show, so only the STEP was saved."
+                                        .to_string(),
+                                ),
+                                (None, None) => notes
+                                    .push("EasyEDA has no 3D model for this part.".to_string()),
+                                (Some(_), Some(_)) => {}
+                            }
+                            if let Some(wrl) = wrl {
                                 outputs.push(Output {
                                     path: wrl_path,
                                     bytes: wrl.into_bytes(),
                                 });
                             }
-                            match step {
-                                Some(step) => outputs.push(Output {
+                            if let Some(step) = step {
+                                outputs.push(Output {
                                     path: step_path,
                                     bytes: step,
-                                }),
-                                None => notes.push(
-                                    "EasyEDA has no STEP model for this part, only the WRL."
-                                        .to_string(),
-                                ),
+                                });
                             }
                         }
                     }
@@ -345,7 +383,12 @@ pub async fn convert(
         return Err(Problem::AlreadyExists { items: conflicts });
     }
 
-    let written = commit(&outputs)?;
+    let (written, leftovers) = commit(&outputs)?;
+    for leftover in leftovers {
+        notes.push(format!(
+            "The earlier version of a replaced file stayed beside it as {leftover}. Delete it when it is no longer needed."
+        ));
+    }
     Ok(Report {
         destination,
         written,
@@ -353,12 +396,18 @@ pub async fn convert(
     })
 }
 
-/// An existing symbol library's text with Windows line endings read as `\n`,
-/// or `None` when there is no library yet. A file that is not a KiCad
-/// symbol library is refused rather than added to.
-fn read_library(path: &Path) -> Result<Option<String>, Problem> {
-    if !path.is_file() {
+/// An existing symbol library, with Windows line endings read as `\n`, and
+/// the names of the symbols in it, or `None` when there is no library yet.
+/// A file that is not one well-formed KiCad symbol library is refused
+/// rather than added to.
+fn read_library(path: &Path) -> Result<Option<(String, Vec<String>)>, Problem> {
+    if !path.exists() {
         return Ok(None);
+    }
+    if !path.is_file() {
+        return Err(Problem::DestinationIsFolder {
+            path: display(path),
+        });
     }
     let bytes = fs::read(path).map_err(|error| Problem::ReadFailed {
         path: display(path),
@@ -367,12 +416,10 @@ fn read_library(path: &Path) -> Result<Option<String>, Problem> {
     let text = String::from_utf8_lossy(&bytes)
         .replace("\r\n", "\n")
         .replace('\r', "\n");
-    if !text.trim_start().starts_with("(kicad_symbol_lib") {
-        return Err(Problem::NotASymbolLibrary {
-            path: display(path),
-        });
-    }
-    Ok(Some(text))
+    let symbols = sexpr::library_symbols(&text).ok_or_else(|| Problem::NotASymbolLibrary {
+        path: display(path),
+    })?;
+    Ok(Some((text, symbols)))
 }
 
 /// Distinguishes this conversion's temporary files from any other's.
@@ -384,11 +431,28 @@ fn beside(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(|| display(path), |name| name.to_string_lossy().into_owned())
+}
+
 /// Writes every output or none of them. Each file is first written next to
 /// its destination. Only when all are written does each replace its
-/// destination, with the file it replaces kept aside until the end, so a
-/// failure puts every destination back as it was.
-fn commit(outputs: &[Output]) -> Result<Vec<String>, Problem> {
+/// destination, with the file it replaces moved aside until the end, so a
+/// failure puts every destination back as it was. When putting one back
+/// fails too, the problem names it and the copy that holds its old content.
+///
+/// Returns the files written, and the names of any earlier versions that
+/// could not be removed once the new files were in place.
+fn commit(outputs: &[Output]) -> Result<(Vec<String>, Vec<String>), Problem> {
+    for output in outputs {
+        if output.path.exists() && !output.path.is_file() {
+            return Err(Problem::DestinationIsFolder {
+                path: display(&output.path),
+            });
+        }
+    }
+
     let run = WRITE_RUN.fetch_add(1, Ordering::Relaxed);
     let tag = format!(".{}-{run}", std::process::id());
 
@@ -413,13 +477,38 @@ fn commit(outputs: &[Output]) -> Result<Vec<String>, Problem> {
         staged.push(temporary);
     }
 
-    // (destination, the file it replaced, moved aside)
+    // Each destination already replaced, with the file it replaced.
     let mut placed: Vec<(&Path, Option<PathBuf>)> = Vec::new();
+    // Puts every replaced destination back and names the ones that could
+    // not be, with where their old content is.
     let undo = |placed: &[(&Path, Option<PathBuf>)]| {
+        let mut unrestored = Vec::new();
         for (destination, previous) in placed.iter().rev() {
-            let _ = fs::remove_file(destination);
-            if let Some(previous) = previous {
-                let _ = fs::rename(previous, destination);
+            let restored = match previous {
+                Some(previous) => fs::rename(previous, destination).is_ok(),
+                None => fs::remove_file(destination).is_ok(),
+            };
+            if !restored {
+                unrestored.push(match previous {
+                    Some(previous) => format!(
+                        "{}, whose earlier version is {}",
+                        display(destination),
+                        file_name(previous)
+                    ),
+                    None => display(destination),
+                });
+            }
+        }
+        unrestored
+    };
+    let fail = |destination: &Path, error: &std::io::Error, unrestored: Vec<String>| {
+        if unrestored.is_empty() {
+            write_failed(destination, error)
+        } else {
+            Problem::WriteIncomplete {
+                path: display(destination),
+                detail: error.to_string(),
+                unrestored,
             }
         }
     };
@@ -428,30 +517,42 @@ fn commit(outputs: &[Output]) -> Result<Vec<String>, Problem> {
         let previous = if destination.exists() {
             let aside = beside(destination, &format!("{tag}.old"));
             if let Err(error) = fs::rename(destination, &aside) {
-                undo(&placed);
+                let unrestored = undo(&placed);
                 discard(&staged[index..]);
-                return Err(write_failed(destination, &error));
+                return Err(fail(destination, &error, unrestored));
             }
             Some(aside)
         } else {
             None
         };
         if let Err(error) = fs::rename(&staged[index], destination) {
-            if let Some(previous) = &previous {
-                let _ = fs::rename(previous, destination);
+            let mut unrestored = Vec::new();
+            if let Some(previous) = &previous
+                && fs::rename(previous, destination).is_err()
+            {
+                unrestored.push(format!(
+                    "{}, whose earlier version is {}",
+                    display(destination),
+                    file_name(previous)
+                ));
             }
-            undo(&placed);
+            unrestored.extend(undo(&placed));
             discard(&staged[index..]);
-            return Err(write_failed(destination, &error));
+            return Err(fail(destination, &error, unrestored));
         }
         placed.push((destination, previous));
     }
+
+    let mut leftovers = Vec::new();
     for (_, previous) in &placed {
-        if let Some(previous) = previous {
-            let _ = fs::remove_file(previous);
+        if let Some(previous) = previous
+            && fs::remove_file(previous).is_err()
+        {
+            leftovers.push(file_name(previous));
         }
     }
-    Ok(outputs.iter().map(|output| display(&output.path)).collect())
+    let written = outputs.iter().map(|output| display(&output.path)).collect();
+    Ok((written, leftovers))
 }
 
 fn write_failed(path: &Path, error: &std::io::Error) -> Problem {
@@ -479,6 +580,99 @@ mod tests {
         assert_eq!(sanitize_library_name("..."), "easyeda2kicad");
     }
 
+    struct NoModels;
+
+    impl ModelSource for NoModels {
+        async fn obj_model(&self, _: &str) -> Result<Option<String>, FetchError> {
+            Ok(None)
+        }
+
+        async fn step_model(&self, _: &str) -> Result<Option<Vec<u8>>, FetchError> {
+            Ok(None)
+        }
+    }
+
+    /// A part with one pin at `pin_x`, converted as a symbol only into a
+    /// Custom Library named `lib` in `folder`.
+    fn convert_symbol(folder: &Path, pin_x: &str) -> Result<Report, Problem> {
+        let component = serde_json::json!({
+            "dataStr": {
+                "head": { "x": 0, "y": 0, "c_para": { "name": "X", "pre": "U?" } },
+                "BBox": { "x": 0, "y": 0, "width": 10, "height": 10 },
+                "shape": [format!("P~show~0~1~{pin_x}~0~0~id~0^^0~0^^M 0 0 h 10~#000^^1~0~0~0~A~start~~~#000^^1~0~0~0~1~end~~~#000^^0~0~0^^0~")]
+            }
+        });
+        let request = Request {
+            lcsc_id: "C1".into(),
+            output_folder: folder.to_string_lossy().into_owned(),
+            mode: LibraryMode::CustomLibrary,
+            library_name: "lib".into(),
+            symbol: true,
+            footprint: false,
+            model: false,
+            overwrite: true,
+            project_relative: false,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(convert(&request, &component, &NoModels))
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let folder = std::env::temp_dir().join(format!("easyeda-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    #[test]
+    fn libraries_that_cannot_be_edited_safely_are_refused() {
+        let folder = scratch("layouts");
+        let library = folder.join("lib.kicad_sym");
+        fs::write(
+            &library,
+            "(kicad_symbol_lib (version 20211014) (symbol \"X\" (in_bom yes)))",
+        )
+        .unwrap();
+        assert!(matches!(
+            convert_symbol(&folder, "0"),
+            Err(Problem::LibraryLayout { .. })
+        ));
+        fs::write(&library, "(kicad_symbol_lib (version 20211014)").unwrap();
+        assert!(matches!(
+            convert_symbol(&folder, "0"),
+            Err(Problem::NotASymbolLibrary { .. })
+        ));
+        fs::remove_file(&library).unwrap();
+        fs::create_dir(&library).unwrap();
+        assert!(matches!(
+            convert_symbol(&folder, "0"),
+            Err(Problem::DestinationIsFolder { .. })
+        ));
+        fs::remove_dir(&library).unwrap();
+        assert!(convert_symbol(&folder, "0").is_ok());
+        assert!(
+            convert_symbol(&folder, "0").is_ok(),
+            "replacing it in place"
+        );
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_coordinate_saves_nothing() {
+        let folder = scratch("unreadable");
+        assert!(matches!(
+            convert_symbol(&folder, "nan"),
+            Err(Problem::UnreadablePart {
+                item: Item::Symbol,
+                ..
+            })
+        ));
+        assert!(!folder.join("lib.kicad_sym").exists());
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
     #[test]
     fn a_failed_write_changes_nothing() {
         let folder = std::env::temp_dir().join(format!("easyeda-commit-{}", std::process::id()));
@@ -498,7 +692,10 @@ mod tests {
                 bytes: b"x".to_vec(),
             },
         ];
-        assert!(matches!(commit(&outputs), Err(Problem::WriteFailed { .. })));
+        assert!(matches!(
+            commit(&outputs),
+            Err(Problem::WriteFailed { .. })
+        ));
         assert_eq!(fs::read_to_string(&library).unwrap(), "old");
         let mut names: Vec<_> = fs::read_dir(&folder)
             .unwrap()

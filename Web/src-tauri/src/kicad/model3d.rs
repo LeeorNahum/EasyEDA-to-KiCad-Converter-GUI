@@ -81,6 +81,13 @@ fn vertex_coordinates(obj: &str) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// Whether the VRML text holds a number a viewer cannot read, which is what
+/// an unreadable vertex becomes.
+pub fn has_unreadable_number(wrl: &str) -> bool {
+    wrl.split(|c: char| c.is_whitespace() || c == ',')
+        .any(super::sexpr::is_non_finite)
+}
+
 /// The VRML text for a model, or `None` when the OBJ has no geometry with a
 /// known material.
 pub fn to_wrl(model: &Ee3dModel, obj: &str) -> Option<String> {
