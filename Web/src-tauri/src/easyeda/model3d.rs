@@ -46,7 +46,9 @@ pub fn from_component(component: &Value) -> Option<Ee3dModel> {
 
 /// Reads the model from the first `SVGNODE` record among `shapes`.
 pub fn from_shapes(shapes: &[&str], origin_x: f64, origin_y: f64) -> Option<Ee3dModel> {
-    let line = shapes.iter().find(|line| line.split('~').next() == Some("SVGNODE"))?;
+    let line = shapes
+        .iter()
+        .find(|line| line.split('~').next() == Some("SVGNODE"))?;
     let node_json = line.split('~').nth(1)?;
     let node: Value = serde_json::from_str(node_json).ok()?;
     if !node.is_object() {
@@ -88,8 +90,16 @@ fn parse_node(node: &Value, origin_x: f64, origin_y: f64) -> Ee3dModel {
     Ee3dModel {
         name: json_text(attrs.get("title")),
         uuid: json_text(attrs.get("uuid")),
-        translation: Xyz { x: tx, y: ty, z: tz },
-        rotation: Xyz { x: axis(0), y: axis(1), z: axis(2) },
+        translation: Xyz {
+            x: tx,
+            y: ty,
+            z: tz,
+        },
+        rotation: Xyz {
+            x: axis(0),
+            y: axis(1),
+            z: axis(2),
+        },
     }
 }
 

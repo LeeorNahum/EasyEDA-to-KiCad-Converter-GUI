@@ -8,7 +8,9 @@
 use serde_json::Value;
 
 use super::svg_path::{self, SvgCommand};
-use super::values::{bool_or, field, float_or, int_or, json_float_or, json_float_or_zero, json_text, or_else};
+use super::values::{
+    bool_or, field, float_or, int_or, json_float_or, json_float_or_zero, json_text, or_else,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EePinType {
@@ -138,7 +140,10 @@ pub fn import(component: &Value) -> EeSymbol {
         .unwrap_or_default();
     let shared_origin = subparts.first().map(|first| {
         let head = &first["dataStr"]["head"];
-        (json_float_or_zero(head.get("x")), json_float_or_zero(head.get("y")))
+        (
+            json_float_or_zero(head.get("x")),
+            json_float_or_zero(head.get("y")),
+        )
     });
 
     let mut symbol = import_unit(component, shared_origin);
@@ -166,7 +171,10 @@ fn import_unit(data: &Value, shared_origin: Option<(f64, f64)>) -> EeSymbol {
     } else if bbox_width > 0.0 || bbox_height > 0.0 {
         (bbox_x + bbox_width / 2.0, bbox_y + bbox_height / 2.0)
     } else {
-        (json_float_or(head.get("x"), 0.0), json_float_or(head.get("y"), 0.0))
+        (
+            json_float_or(head.get("x"), 0.0),
+            json_float_or(head.get("y"), 0.0),
+        )
     };
 
     let lcsc = data.get("lcsc").filter(|v| v.is_object());
@@ -207,7 +215,10 @@ fn import_unit(data: &Value, shared_origin: Option<(f64, f64)>) -> EeSymbol {
 
     let mut symbol = EeSymbol {
         info,
-        bbox: EeBbox { x: origin_x, y: origin_y },
+        bbox: EeBbox {
+            x: origin_x,
+            y: origin_y,
+        },
         ..EeSymbol::default()
     };
 
@@ -224,7 +235,9 @@ fn import_unit(data: &Value, shared_origin: Option<(f64, f64)>) -> EeSymbol {
             "PG" => symbol.polygons.push(read_polyline(line)),
             "PT" => {
                 let fields: Vec<&str> = line.split('~').collect();
-                symbol.paths.push(EePath { paths: field(&fields, 1).to_string() });
+                symbol.paths.push(EePath {
+                    paths: field(&fields, 1).to_string(),
+                });
             }
             "T" => add_text(line, &mut symbol),
             _ => {}
@@ -272,13 +285,12 @@ fn add_pin(data: &str, symbol: &mut EeSymbol) {
 /// Both put the width and height after them.
 fn add_rectangle(data: &str, symbol: &mut EeSymbol) {
     let parts: Vec<&str> = data.split('~').skip(1).collect();
-    let (width, height) = if (parts.len() >= 6 && parts[2].is_empty() && parts[3].is_empty())
-        || parts.len() >= 8
-    {
-        (field(&parts, 4), field(&parts, 5))
-    } else {
-        (field(&parts, 2), field(&parts, 3))
-    };
+    let (width, height) =
+        if (parts.len() >= 6 && parts[2].is_empty() && parts[3].is_empty()) || parts.len() >= 8 {
+            (field(&parts, 4), field(&parts, 5))
+        } else {
+            (field(&parts, 2), field(&parts, 3))
+        };
     symbol.rectangles.push(EeRectangle {
         pos_x: float_or(field(&parts, 0), 0.0),
         pos_y: float_or(field(&parts, 1), 0.0),
@@ -314,7 +326,9 @@ fn add_ellipse(data: &str, symbol: &mut EeSymbol) {
 /// `add_easyeda_arc`: `A~path~helper_dots~...`.
 fn add_arc(data: &str, symbol: &mut EeSymbol) {
     let fields: Vec<&str> = data.split('~').collect();
-    symbol.arcs.push(EeArc { path: svg_path::parse(field(&fields, 1)) });
+    symbol.arcs.push(EeArc {
+        path: svg_path::parse(field(&fields, 1)),
+    });
 }
 
 /// `PL~points~stroke_color~stroke_width~stroke_style~fill~id~locked`, and the

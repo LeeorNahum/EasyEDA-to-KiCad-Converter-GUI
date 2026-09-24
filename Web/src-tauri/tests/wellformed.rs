@@ -19,7 +19,7 @@ use easyeda_to_kicad_converter::easyeda::api::Client;
 enum Node {
     Atom,
     Text,
-    List(Vec<Node>),
+    List,
 }
 
 struct Reader<'a> {
@@ -55,20 +55,27 @@ impl Reader<'_> {
                 }
                 match items.first() {
                     Some(Node::Atom) => {}
-                    _ => return Err(format!("list at byte {start} does not start with a keyword")),
+                    _ => {
+                        return Err(format!(
+                            "list at byte {start} does not start with a keyword"
+                        ));
+                    }
                 }
                 let keyword_end = self.text[start + 1..]
                     .iter()
                     .position(|c| c.is_ascii_whitespace() || *c == b')')
                     .map_or(self.text.len(), |p| start + 1 + p);
                 let keyword = &self.text[start + 1..keyword_end];
-                if !keyword.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_') {
+                if !keyword
+                    .iter()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+                {
                     return Err(format!(
                         "list at byte {start} starts with {:?}, not a keyword",
                         String::from_utf8_lossy(keyword)
                     ));
                 }
-                Ok(Node::List(items))
+                Ok(Node::List)
             }
             Some(b')') => Err(format!("unmatched ')' at byte {}", self.at)),
             Some(b'"') => {
@@ -80,7 +87,12 @@ impl Reader<'_> {
                         Some(b'\\') => {
                             match self.text.get(self.at + 1) {
                                 Some(b'\\' | b'"' | b'n' | b'r' | b't') => {}
-                                other => return Err(format!("unknown escape {other:?} at byte {}", self.at)),
+                                other => {
+                                    return Err(format!(
+                                        "unknown escape {other:?} at byte {}",
+                                        self.at
+                                    ));
+                                }
                             }
                             self.at += 2;
                         }
@@ -88,7 +100,9 @@ impl Reader<'_> {
                             self.at += 1;
                             return Ok(Node::Text);
                         }
-                        Some(b'\n') => return Err(format!("string at byte {start} runs across a line")),
+                        Some(b'\n') => {
+                            return Err(format!("string at byte {start} runs across a line"));
+                        }
                         Some(_) => self.at += 1,
                     }
                 }
@@ -111,13 +125,19 @@ impl Reader<'_> {
 
 /// Reads a whole file as one top-level list and returns its keyword.
 fn read(text: &str) -> Result<String, String> {
-    let mut reader = Reader { text: text.as_bytes(), at: 0 };
+    let mut reader = Reader {
+        text: text.as_bytes(),
+        at: 0,
+    };
     let root = reader.node()?;
     reader.skip_space();
     if reader.at != text.len() {
-        return Err(format!("text after the top-level list at byte {}", reader.at));
+        return Err(format!(
+            "text after the top-level list at byte {}",
+            reader.at
+        ));
     }
-    let Node::List(_) = root else {
+    let Node::List = root else {
         return Err("the file is not a list".into());
     };
     let keyword: String = text
@@ -138,7 +158,10 @@ fn check_file(path: &Path) -> Result<(), String> {
         _ => return Ok(()),
     };
     if keyword != expected {
-        return Err(format!("{}: starts with {keyword}, expected {expected}", path.display()));
+        return Err(format!(
+            "{}: starts with {keyword}, expected {expected}",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -151,7 +174,10 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 pending.push(path);
-            } else if matches!(path.extension().and_then(|e| e.to_str()), Some("kicad_sym" | "kicad_mod")) {
+            } else if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("kicad_sym" | "kicad_mod")
+            ) {
                 found.push(path);
             }
         }
@@ -164,13 +190,22 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
 fn the_reader_is_strict() {
     assert!(read("(kicad_symbol_lib (version 1) (name \"a \\\"b\\\"\"))").is_ok());
     assert!(read("(module x (pad 1 smd rect))\n").is_ok());
-    assert!(read("(module (\"x\"))").is_err(), "a list without a keyword");
+    assert!(
+        read("(module (\"x\"))").is_err(),
+        "a list without a keyword"
+    );
     assert!(read("(module x").is_err(), "an unclosed list");
     assert!(read("(module x))").is_err(), "an extra parenthesis");
     assert!(read("(module \"x)").is_err(), "an unclosed string");
-    assert!(read("(module x) (module y)").is_err(), "two top-level lists");
+    assert!(
+        read("(module x) (module y)").is_err(),
+        "two top-level lists"
+    );
     assert!(read("(module a\"b)").is_err(), "a quote inside a word");
-    assert!(read("(Module x)").is_err(), "a keyword that is not lowercase");
+    assert!(
+        read("(Module x)").is_err(),
+        "a keyword that is not lowercase"
+    );
 }
 
 #[test]
@@ -178,7 +213,11 @@ fn the_reader_is_strict() {
 fn produced_files_are_well_formed() {
     let root = PathBuf::from(std::env::var("WELLFORMED_DIR").expect("set WELLFORMED_DIR"));
     let files = files_under(&root);
-    assert!(!files.is_empty(), "no .kicad_sym or .kicad_mod files under {}", root.display());
+    assert!(
+        !files.is_empty(),
+        "no .kicad_sym or .kicad_mod files under {}",
+        root.display()
+    );
     let failures: Vec<String> = files.iter().filter_map(|f| check_file(f).err()).collect();
     println!("checked {} files", files.len());
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -191,7 +230,10 @@ async fn live_conversion_is_well_formed() {
     fs::create_dir_all(&output).unwrap();
     let client = Client::new();
     for part in ["C25804", "C2040"] {
-        let component = client.component(part).await.expect("EasyEDA returns the part");
+        let component = client
+            .component(part)
+            .await
+            .expect("EasyEDA returns the part");
         let request = Request {
             lcsc_id: part.to_string(),
             output_folder: output.to_string_lossy().into_owned(),
@@ -203,13 +245,22 @@ async fn live_conversion_is_well_formed() {
             overwrite: true,
             project_relative: true,
         };
-        let report = convert::convert(&request, &component, &client).await.expect("the part converts");
-        assert!(report.written.iter().any(|p| p.ends_with(".wrl")), "{part} has a WRL model");
+        let report = convert::convert(&request, &component, &client)
+            .await
+            .expect("the part converts");
+        assert!(
+            report.written.iter().any(|p| p.ends_with(".wrl")),
+            "{part} has a WRL model"
+        );
         for path in &report.written {
             let path = Path::new(path);
             match path.extension().and_then(|e| e.to_str()) {
                 Some("step") => assert!(fs::read(path).unwrap().starts_with(b"ISO-10303-21;")),
-                Some("wrl") => assert!(fs::read_to_string(path).unwrap().starts_with("#VRML V2.0 utf8\n")),
+                Some("wrl") => assert!(
+                    fs::read_to_string(path)
+                        .unwrap()
+                        .starts_with("#VRML V2.0 utf8\n")
+                ),
                 _ => check_file(path).unwrap(),
             }
         }

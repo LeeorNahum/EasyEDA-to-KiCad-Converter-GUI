@@ -23,7 +23,11 @@ fn fp_to_ki(text: &str) -> f64 {
 
 /// `fp_to_ki` on a number.
 fn fp_to_ki_value(value: f64) -> f64 {
-    if value.is_nan() { 0.0 } else { round_digits(value * 10.0 * 0.0254, 6) }
+    if value.is_nan() {
+        0.0
+    } else {
+        round_digits(value * 10.0 * 0.0254, 6)
+    }
 }
 
 fn pad_layers(layer_id: i64, through_hole: bool) -> &'static str {
@@ -87,9 +91,17 @@ fn drill_to_ki(hole_radius: f64, hole_length: f64, pad_height: f64, pad_width: f
         let pos_0 = pad_height - longest;
         let pos_90 = pad_width - longest;
         if pos_0.max(pos_90) == pos_0 {
-            return format!("(drill oval {} {})", repr(hole_radius * 2.0), repr(hole_length));
+            return format!(
+                "(drill oval {} {})",
+                repr(hole_radius * 2.0),
+                repr(hole_length)
+            );
         }
-        return format!("(drill oval {} {})", repr(hole_length), repr(hole_radius * 2.0));
+        return format!(
+            "(drill oval {} {})",
+            repr(hole_length),
+            repr(hole_radius * 2.0)
+        );
     }
     if hole_radius > 0.0 {
         return format!("(drill {})", repr(2.0 * hole_radius));
@@ -128,7 +140,11 @@ fn compute_arc(
     let x1_sq = x1 * x1;
     let y1_sq = y1 * y1;
 
-    let radii_check = if rx_sq != 0.0 && ry_sq != 0.0 { x1_sq / rx_sq + y1_sq / ry_sq } else { 0.0 };
+    let radii_check = if rx_sq != 0.0 && ry_sq != 0.0 {
+        x1_sq / rx_sq + y1_sq / ry_sq
+    } else {
+        0.0
+    };
     if radii_check > 1.0 {
         radius_x *= radii_check.sqrt();
         radius_y *= radii_check.sqrt();
@@ -144,17 +160,37 @@ fn compute_arc(
     let sq: f64 = if sq < 0.0 { 0.0 } else { sq };
     let coef = sign * sq.sqrt();
     let cx1 = coef * ((radius_x * y1) / radius_y);
-    let cy1 = if radius_x != 0.0 { coef * -((radius_y * x1) / radius_x) } else { 0.0 };
+    let cy1 = if radius_x != 0.0 {
+        coef * -((radius_y * x1) / radius_x)
+    } else {
+        0.0
+    };
 
     let sx2 = (start_x + end_x) / 2.0;
     let sy2 = (start_y + end_y) / 2.0;
     let cx = sx2 + (cos_angle * cx1 - sin_angle * cy1);
     let cy = sy2 + (sin_angle * cx1 + cos_angle * cy1);
 
-    let ux = if radius_x != 0.0 { (x1 - cx1) / radius_x } else { 0.0 };
-    let uy = if radius_y != 0.0 { (y1 - cy1) / radius_y } else { 0.0 };
-    let vx = if radius_x != 0.0 { (-x1 - cx1) / radius_x } else { 0.0 };
-    let vy = if radius_y != 0.0 { (-y1 - cy1) / radius_y } else { 0.0 };
+    let ux = if radius_x != 0.0 {
+        (x1 - cx1) / radius_x
+    } else {
+        0.0
+    };
+    let uy = if radius_y != 0.0 {
+        (y1 - cy1) / radius_y
+    } else {
+        0.0
+    };
+    let vx = if radius_x != 0.0 {
+        (-x1 - cx1) / radius_x
+    } else {
+        0.0
+    };
+    let vy = if radius_y != 0.0 {
+        (-y1 - cy1) / radius_y
+    } else {
+        0.0
+    };
 
     let n = ((ux * ux + uy * uy) * (vx * vx + vy * vy)).sqrt();
     let p = ux * vx + uy * vy;
@@ -194,7 +230,9 @@ fn solid_region_points(path: &str, bbox_x_px: f64, bbox_y_px: f64) -> Vec<(f64, 
     let (mut cur_x, mut cur_y) = (0.0, 0.0);
     for token in tokens {
         let token = token.trim();
-        let Some(command) = token.chars().next() else { continue };
+        let Some(command) = token.chars().next() else {
+            continue;
+        };
         let args: Vec<f64> = token[command.len_utf8()..]
             .split(|c: char| c == ',' || c.is_whitespace())
             .filter(|a| !a.is_empty())
@@ -237,7 +275,11 @@ enum RegionOutput {
     Filled(&'static str, Vec<(f64, f64)>),
 }
 
-fn convert_solid_region(region: &EeSolidRegion, bbox_x_px: f64, bbox_y_px: f64) -> Option<RegionOutput> {
+fn convert_solid_region(
+    region: &EeSolidRegion,
+    bbox_x_px: f64,
+    bbox_y_px: f64,
+) -> Option<RegionOutput> {
     if !SOLID_REGION_LAYERS.contains(&region.layer_id) {
         return None;
     }
@@ -292,7 +334,11 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
     if !info.description.is_empty() {
         out.push_str(&format!("\t(descr \"{}\")\n", escape(&info.description)));
     }
-    out.push_str(if info.is_smd { "\t(attr smd)\n" } else { "\t(attr through_hole)\n" });
+    out.push_str(if info.is_smd {
+        "\t(attr smd)\n"
+    } else {
+        "\t(attr through_hole)\n"
+    });
 
     // Pads first, since the reference and value text sit above and below them.
     struct Pad {
@@ -348,7 +394,11 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
                 .map(|pair| {
                     let x = pair[0];
                     let y = pair.get(1).copied().unwrap_or(f64::NAN);
-                    format!("(xy {} {})", fixed(x - bbox.x - pad.x, 6), fixed(y - bbox.y - pad.y, 6))
+                    format!(
+                        "(xy {} {})",
+                        fixed(x - bbox.x - pad.x, 6),
+                        fixed(y - bbox.y - pad.y, 6)
+                    )
                 })
                 .collect();
             pad.polygon = format!(
@@ -473,7 +523,11 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
         if text.text_type == "N" {
             layers = layers.replace(".SilkS", ".Fab");
         }
-        let mirror = if layers.starts_with('B') { " mirror" } else { "" };
+        let mirror = if layers.starts_with('B') {
+            " mirror"
+        } else {
+            ""
+        };
         let font_size = text.font_size.max(1.0);
         out.push_str(&format!(
             "\t(fp_text user {} (at {} {} {}) (layer {layers}){}\n\t\t(effects (font (size {} {}) (thickness {})) (justify left{mirror}))\n\t)\n",
@@ -532,7 +586,11 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
 /// One `ARC` record as a KiCad `fp_arc`: its centre, its end point, and its
 /// sweep. Returns `None` for a path this cannot read.
 fn render_arc(arc: &crate::easyeda::footprint::EeArc, bbox_x: f64, bbox_y: f64) -> Option<String> {
-    let path = arc.path.replace(',', " ").replace("M ", "M").replace("A ", "A");
+    let path = arc
+        .path
+        .replace(',', " ")
+        .replace("M ", "M")
+        .replace("A ", "A");
     let mut parts = path.split('A');
     let start_part = parts.next()?;
     let arc_part = parts.next()?;

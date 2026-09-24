@@ -42,18 +42,34 @@ async fn fetch(cache: &Path, parts: &[String]) -> Result<(), String> {
     fs::create_dir_all(cache).map_err(|e| e.to_string())?;
     let client = Client::new();
     for part in parts {
-        let component = client.component(part).await.map_err(|e| format!("{part}: {e:?}"))?;
+        let component = client
+            .component(part)
+            .await
+            .map_err(|e| format!("{part}: {e:?}"))?;
         let response = json!({ "success": true, "code": 0, "result": component });
-        fs::write(cache.join(format!("{part}.json")), serde_json::to_vec_pretty(&response).unwrap())
-            .map_err(|e| e.to_string())?;
+        fs::write(
+            cache.join(format!("{part}.json")),
+            serde_json::to_vec_pretty(&response).unwrap(),
+        )
+        .map_err(|e| e.to_string())?;
         let mut saved = vec!["component"];
         if let Some(model) = model3d::from_component(&component) {
-            if let Some(obj) = client.obj_model(&model.uuid).await.map_err(|e| format!("{part}: {e:?}"))? {
-                fs::write(cache.join(format!("{}.obj", model.uuid)), obj).map_err(|e| e.to_string())?;
+            if let Some(obj) = client
+                .obj_model(&model.uuid)
+                .await
+                .map_err(|e| format!("{part}: {e:?}"))?
+            {
+                fs::write(cache.join(format!("{}.obj", model.uuid)), obj)
+                    .map_err(|e| e.to_string())?;
                 saved.push("obj");
             }
-            if let Some(step) = client.step_model(&model.uuid).await.map_err(|e| format!("{part}: {e:?}"))? {
-                fs::write(cache.join(format!("{}.step", model.uuid)), step).map_err(|e| e.to_string())?;
+            if let Some(step) = client
+                .step_model(&model.uuid)
+                .await
+                .map_err(|e| format!("{part}: {e:?}"))?
+            {
+                fs::write(cache.join(format!("{}.step", model.uuid)), step)
+                    .map_err(|e| e.to_string())?;
                 saved.push("step");
             }
         }
@@ -62,7 +78,12 @@ async fn fetch(cache: &Path, parts: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-async fn convert_saved(cache: &Path, output: &Path, part: &str, options: &[String]) -> Result<(), String> {
+async fn convert_saved(
+    cache: &Path,
+    output: &Path,
+    part: &str,
+    options: &[String],
+) -> Result<(), String> {
     let text = fs::read_to_string(cache.join(format!("{part}.json"))).map_err(|e| e.to_string())?;
     let response: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let component = &response["result"];
@@ -98,7 +119,9 @@ async fn convert_saved(cache: &Path, output: &Path, part: &str, options: &[Strin
     }
 
     fs::create_dir_all(output).map_err(|e| e.to_string())?;
-    let models = SavedModels { folder: cache.to_path_buf() };
+    let models = SavedModels {
+        folder: cache.to_path_buf(),
+    };
     match convert::convert(&request, component, &models).await {
         Ok(report) => {
             for path in &report.written {

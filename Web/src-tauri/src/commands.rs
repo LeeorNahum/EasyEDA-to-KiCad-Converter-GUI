@@ -23,7 +23,12 @@ pub struct Parts {
 
 impl Parts {
     async fn component(&self, lcsc_id: &str) -> Result<Value, Problem> {
-        if let Some(found) = self.fetched.lock().expect("the part cache lock is never poisoned").get(lcsc_id) {
+        if let Some(found) = self
+            .fetched
+            .lock()
+            .expect("the part cache lock is never poisoned")
+            .get(lcsc_id)
+        {
             return Ok(found.clone());
         }
         let component = self
@@ -50,14 +55,23 @@ pub struct AppInfo {
 pub fn app_info(app: AppHandle) -> AppInfo {
     AppInfo {
         version: app.package_info().version.to_string(),
-        default_output_folder: convert::default_output_folder().to_string_lossy().into_owned(),
+        default_output_folder: convert::default_output_folder()
+            .to_string_lossy()
+            .into_owned(),
     }
 }
 
 #[tauri::command]
-pub async fn look_up_part(lcsc_id: String, parts: State<'_, Parts>) -> Result<PartSummary, Message> {
-    let lcsc_id = convert::normalize_part_number(&lcsc_id).ok_or(Problem::InvalidPartNumber.into_message())?;
-    let component = parts.component(&lcsc_id).await.map_err(Problem::into_message)?;
+pub async fn look_up_part(
+    lcsc_id: String,
+    parts: State<'_, Parts>,
+) -> Result<PartSummary, Message> {
+    let lcsc_id = convert::normalize_part_number(&lcsc_id)
+        .ok_or(Problem::InvalidPartNumber.into_message())?;
+    let component = parts
+        .component(&lcsc_id)
+        .await
+        .map_err(Problem::into_message)?;
     Ok(convert::summarize(&lcsc_id, &component))
 }
 
@@ -68,9 +82,12 @@ pub fn plan_destination(request: Request) -> Result<Destination, Message> {
 
 #[tauri::command]
 pub async fn convert_part(request: Request, parts: State<'_, Parts>) -> Result<Report, Message> {
-    let lcsc_id =
-        convert::normalize_part_number(&request.lcsc_id).ok_or(Problem::InvalidPartNumber.into_message())?;
-    let component = parts.component(&lcsc_id).await.map_err(Problem::into_message)?;
+    let lcsc_id = convert::normalize_part_number(&request.lcsc_id)
+        .ok_or(Problem::InvalidPartNumber.into_message())?;
+    let component = parts
+        .component(&lcsc_id)
+        .await
+        .map_err(Problem::into_message)?;
     convert::convert(&request, &component, &parts.client)
         .await
         .map_err(Problem::into_message)
@@ -89,7 +106,10 @@ pub async fn choose_folder(app: AppHandle, start: String) -> Option<String> {
         let _ = sender.send(folder);
     });
     let folder = receiver.await.ok().flatten()?;
-    folder.into_path().ok().map(|path| path.to_string_lossy().into_owned())
+    folder
+        .into_path()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Opens a folder in the file manager.
@@ -97,5 +117,11 @@ pub async fn choose_folder(app: AppHandle, start: String) -> Option<String> {
 pub fn open_folder(app: AppHandle, path: String) -> Result<(), Message> {
     app.opener()
         .open_path(&path, None::<&str>)
-        .map_err(|error| Problem::OpenFailed { path: path.clone(), detail: error.to_string() }.into_message())
+        .map_err(|error| {
+            Problem::OpenFailed {
+                path: path.clone(),
+                detail: error.to_string(),
+            }
+            .into_message()
+        })
 }

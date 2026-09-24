@@ -42,7 +42,9 @@ pub struct Message {
 impl Problem {
     pub fn from_fetch(error: FetchError, lcsc_id: &str) -> Self {
         match error {
-            FetchError::PartNotFound => Problem::PartNotFound { lcsc_id: lcsc_id.to_string() },
+            FetchError::PartNotFound => Problem::PartNotFound {
+                lcsc_id: lcsc_id.to_string(),
+            },
             FetchError::Refused(status) => Problem::EasyedaRefused { status },
             FetchError::Unreachable(detail) => Problem::EasyedaUnreachable { detail },
             FetchError::Status(status) => Problem::EasyedaFailed {

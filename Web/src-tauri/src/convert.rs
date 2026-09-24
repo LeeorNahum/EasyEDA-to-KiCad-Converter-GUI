@@ -81,7 +81,8 @@ pub struct Report {
     pub notes: Vec<String>,
 }
 
-static PART_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^C\d+$").expect("valid pattern"));
+static PART_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^C\d+$").expect("valid pattern"));
 static RESERVED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1f]+"#).expect("valid pattern"));
 static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("valid pattern"));
@@ -101,7 +102,11 @@ pub fn sanitize_library_name(name: &str) -> String {
     let name = WHITESPACE.replace_all(&name, "_");
     let name = UNDERSCORES.replace_all(&name, "_");
     let name = name.trim_matches(|c| c == '.' || c == '_' || c == ' ');
-    if name.is_empty() { "easyeda2kicad".to_string() } else { name.to_string() }
+    if name.is_empty() {
+        "easyeda2kicad".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// The library name offered for a part: its manufacturer part number, or
@@ -140,13 +145,18 @@ pub fn plan(request: &Request) -> Result<Destination, Problem> {
     } else {
         let folder = PathBuf::from(chosen);
         if !folder.is_dir() {
-            return Err(Problem::OutputFolderMissing { path: chosen.to_string() });
+            return Err(Problem::OutputFolderMissing {
+                path: chosen.to_string(),
+            });
         }
         folder
     };
 
     let (folder, relative_stem) = match request.mode {
-        LibraryMode::SinglePart => (base.join(&library_name), format!("{library_name}/{library_name}")),
+        LibraryMode::SinglePart => (
+            base.join(&library_name),
+            format!("{library_name}/{library_name}"),
+        ),
         LibraryMode::CustomLibrary => (base.clone(), library_name.clone()),
     };
     let stem = folder.join(&library_name);
@@ -257,8 +267,13 @@ pub async fn convert(
         let version = symbol::library_version(existing.as_deref());
         let content = symbol::export(&ee, library, version);
         let text = symbol::write_into_library(existing.as_deref(), &ee.info.name, &content)
-            .ok_or_else(|| Problem::NotASymbolLibrary { path: destination.symbol_library.clone() })?;
-        outputs.push(Output { path, bytes: text.into_bytes() });
+            .ok_or_else(|| Problem::NotASymbolLibrary {
+                path: destination.symbol_library.clone(),
+            })?;
+        outputs.push(Output {
+            path,
+            bytes: text.into_bytes(),
+        });
     }
 
     let has_footprint = component["packageDetail"]["dataStr"]["shape"].is_array();
@@ -273,7 +288,10 @@ pub async fn convert(
             conflicts.push(format!("the footprint {}", footprint::footprint_name(&ee)));
         }
         let text = footprint::export(&ee, &destination.model_reference);
-        outputs.push(Output { path, bytes: text.into_bytes() });
+        outputs.push(Output {
+            path,
+            bytes: text.into_bytes(),
+        });
     }
 
     if request.model {
@@ -300,11 +318,20 @@ pub async fn convert(
                         Some(obj) => {
                             let step = models.step_model(&model.uuid).await.map_err(fetch)?;
                             if let Some(wrl) = model3d::to_wrl(&model, &obj) {
-                                outputs.push(Output { path: wrl_path, bytes: wrl.into_bytes() });
+                                outputs.push(Output {
+                                    path: wrl_path,
+                                    bytes: wrl.into_bytes(),
+                                });
                             }
                             match step {
-                                Some(step) => outputs.push(Output { path: step_path, bytes: step }),
-                                None => notes.push("EasyEDA has no STEP model for this part, only the WRL.".to_string()),
+                                Some(step) => outputs.push(Output {
+                                    path: step_path,
+                                    bytes: step,
+                                }),
+                                None => notes.push(
+                                    "EasyEDA has no STEP model for this part, only the WRL."
+                                        .to_string(),
+                                ),
                             }
                         }
                     }
@@ -322,7 +349,11 @@ pub async fn convert(
         write_file(&output.path, &output.bytes)?;
         written.push(display(&output.path));
     }
-    Ok(Report { destination, written, notes })
+    Ok(Report {
+        destination,
+        written,
+        notes,
+    })
 }
 
 /// An existing symbol library's text with Windows line endings read as `\n`,
@@ -353,7 +384,10 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), Problem> {
 }
 
 fn write_failed(path: &Path, error: &std::io::Error) -> Problem {
-    Problem::WriteFailed { path: display(path), detail: error.to_string() }
+    Problem::WriteFailed {
+        path: display(path),
+        detail: error.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -362,8 +396,14 @@ mod tests {
 
     #[test]
     fn library_names_match_the_python_gui() {
-        assert_eq!(suggested_library_name("C25804", "0603WAF1002T5E", "0603WAF1002T5E"), "0603WAF1002T5E_C25804");
-        assert_eq!(suggested_library_name("C160354", "B4B-PH-SM4-TB (LF)(SN)", ""), "B4B-PH-SM4-TB_(LF)(SN)_C160354");
+        assert_eq!(
+            suggested_library_name("C25804", "0603WAF1002T5E", "0603WAF1002T5E"),
+            "0603WAF1002T5E_C25804"
+        );
+        assert_eq!(
+            suggested_library_name("C160354", "B4B-PH-SM4-TB (LF)(SN)", ""),
+            "B4B-PH-SM4-TB_(LF)(SN)_C160354"
+        );
         assert_eq!(sanitize_library_name("  a/b  c__d. "), "a_b_c_d");
         assert_eq!(sanitize_library_name("..."), "easyeda2kicad");
     }
@@ -390,12 +430,27 @@ mod tests {
             project_relative: true,
         };
         let single = plan(&request).unwrap();
-        assert_eq!(single.model_reference, "${KIPRJMOD}/Part_C1/Part_C1.3dshapes");
+        assert_eq!(
+            single.model_reference,
+            "${KIPRJMOD}/Part_C1/Part_C1.3dshapes"
+        );
         assert!(single.symbol_library.ends_with("Part_C1.kicad_sym"));
-        let custom = plan(&Request { mode: LibraryMode::CustomLibrary, ..request.clone() }).unwrap();
+        let custom = plan(&Request {
+            mode: LibraryMode::CustomLibrary,
+            ..request.clone()
+        })
+        .unwrap();
         assert_eq!(custom.model_reference, "${KIPRJMOD}/Part_C1.3dshapes");
-        let absolute = plan(&Request { project_relative: false, ..request }).unwrap();
+        let absolute = plan(&Request {
+            project_relative: false,
+            ..request
+        })
+        .unwrap();
         assert!(!absolute.model_reference.contains('\\'));
-        assert!(absolute.model_reference.ends_with("/Part_C1/Part_C1.3dshapes"));
+        assert!(
+            absolute
+                .model_reference
+                .ends_with("/Part_C1/Part_C1.3dshapes")
+        );
     }
 }

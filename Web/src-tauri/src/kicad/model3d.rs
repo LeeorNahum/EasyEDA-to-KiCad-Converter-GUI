@@ -33,7 +33,11 @@ fn materials(obj: &str) -> HashMap<String, Material> {
         let mut material = Material::default();
         let mut id = None;
         for line in split_lines(block.as_str()) {
-            let values: Vec<String> = line.split_whitespace().skip(1).map(str::to_string).collect();
+            let values: Vec<String> = line
+                .split_whitespace()
+                .skip(1)
+                .map(str::to_string)
+                .collect();
             if line.starts_with("newmtl") {
                 id = values.first().cloned();
             } else if line.starts_with("Ka") {
@@ -68,7 +72,11 @@ fn vertex_coordinates(obj: &str) -> Vec<[f64; 3]> {
             if parts.len() < 4 || parts[0] != "v" {
                 return None;
             }
-            Some([py_float(parts[1])?, py_float(parts[2])?, py_float(parts[3])?])
+            Some([
+                py_float(parts[1])?,
+                py_float(parts[2])?,
+                py_float(parts[3])?,
+            ])
         })
         .collect()
 }
@@ -120,7 +128,10 @@ pub fn to_wrl(model: &Ee3dModel, obj: &str) -> Option<String> {
     let mut wrl = VRML_HEADER.to_string();
     for shape in shapes {
         let lines = split_lines(shape);
-        let material_name = lines.first().map(|l| l.replace(' ', "")).unwrap_or_default();
+        let material_name = lines
+            .first()
+            .map(|l| l.replace(' ', ""))
+            .unwrap_or_default();
         let Some(material) = materials.get(&material_name) else {
             continue;
         };
@@ -146,7 +157,9 @@ pub fn to_wrl(model: &Ee3dModel, obj: &str) -> Option<String> {
                         } else {
                             vertices.len() as i64 + index - 1
                         };
-                        let vertex = usize::try_from(position).ok().and_then(|p| vertices.get(p))?;
+                        let vertex = usize::try_from(position)
+                            .ok()
+                            .and_then(|p| vertices.get(p))?;
                         let local = points.len();
                         points.push(vertex.as_str());
                         index_of.insert(index, local);
@@ -173,9 +186,18 @@ pub fn to_wrl(model: &Ee3dModel, obj: &str) -> Option<String> {
             (Some(r), Some(g), Some(b)) => repr(round_digits(0.299 * r + 0.587 * g + 0.114 * b, 4)),
             _ => repr(0.2),
         };
-        let transparency = material.transparency.clone().unwrap_or_else(|| "0".to_string());
-        let diffuse = material.diffuse.as_ref().map_or("0.8 0.8 0.8".to_string(), |c| c.join(" "));
-        let specular = material.specular.as_ref().map_or("0 0 0".to_string(), |c| c.join(" "));
+        let transparency = material
+            .transparency
+            .clone()
+            .unwrap_or_else(|| "0".to_string());
+        let diffuse = material
+            .diffuse
+            .as_ref()
+            .map_or("0.8 0.8 0.8".to_string(), |c| c.join(" "));
+        let specular = material
+            .specular
+            .as_ref()
+            .map_or("0 0 0".to_string(), |c| c.join(" "));
 
         let shape_text = format!(
             "\n            Shape{{\n                appearance Appearance {{\n                    material  Material \t{{\n                        diffuseColor {diffuse}\n                        specularColor {specular}\n                        ambientIntensity {ambient_intensity}\n                        transparency {transparency}\n                        shininess 0.5\n                    }}\n                }}\n                geometry IndexedFaceSet {{\n                    ccw TRUE\n                    solid FALSE\n                    coord DEF co Coordinate {{\n                        point [\n                            {}\n                        ]\n                    }}\n                    coordIndex [\n                        {coord_index}\n                    ]\n                }}\n            }}",

@@ -264,7 +264,10 @@ pub fn import(component: &Value) -> EeFootprint {
                 let canvas = json_text(data_str.get("canvas"));
                 let canvas_parts: Vec<&str> = canvas.split('~').collect();
                 let (origin_x, origin_y) = if canvas_parts.len() > 17 {
-                    (float_or(canvas_parts[16], 0.0), float_or(canvas_parts[17], 0.0))
+                    (
+                        float_or(canvas_parts[16], 0.0),
+                        float_or(canvas_parts[17], 0.0),
+                    )
                 } else {
                     (bbox_x_px, bbox_y_px)
                 };

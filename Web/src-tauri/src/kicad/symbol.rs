@@ -211,7 +211,12 @@ fn to_kicad(symbol: &EeSymbol, footprint_library: &str) -> KiSymbol {
             .map(|r| {
                 let x0 = px_to_mm(r.pos_x - bbox.x);
                 let y0 = -px_to_mm(r.pos_y - bbox.y);
-                KiRectangle { x0, y0, x1: px_to_mm(r.width) + x0, y1: -px_to_mm(r.height) + y0 }
+                KiRectangle {
+                    x0,
+                    y0,
+                    x1: px_to_mm(r.width) + x0,
+                    y1: -px_to_mm(r.height) + y0,
+                }
             })
             .collect(),
         circles: symbol
@@ -248,10 +253,20 @@ fn to_kicad(symbol: &EeSymbol, footprint_library: &str) -> KiSymbol {
     ki.polygons = path_polygons;
     ki.beziers = path_beziers;
     for polyline in &symbol.polylines {
-        ki.polygons.extend(convert_polyline(&polyline.points, polyline.filled, false, bbox));
+        ki.polygons.extend(convert_polyline(
+            &polyline.points,
+            polyline.filled,
+            false,
+            bbox,
+        ));
     }
     for polygon in &symbol.polygons {
-        ki.polygons.extend(convert_polyline(&polygon.points, polygon.filled, true, bbox));
+        ki.polygons.extend(convert_polyline(
+            &polygon.points,
+            polygon.filled,
+            true,
+            bbox,
+        ));
     }
 
     ki.texts = symbol
@@ -351,9 +366,17 @@ fn arc_mid_point(
     let sign = if large_arc == sweep { -1.0 } else { 1.0 };
     let num = (rx_sq * ry_sq - rx_sq * y1_sq - ry_sq * x1_sq).max(0.0);
     let den = rx_sq * y1_sq + ry_sq * x1_sq;
-    let coef = if den > 0.0 { sign * (num / den).sqrt() } else { 0.0 };
+    let coef = if den > 0.0 {
+        sign * (num / den).sqrt()
+    } else {
+        0.0
+    };
     let cx1 = coef * (rx * y1 / ry);
-    let cy1 = if rx != 0.0 { coef * -(ry * x1 / rx) } else { 0.0 };
+    let cy1 = if rx != 0.0 {
+        coef * -(ry * x1 / rx)
+    } else {
+        0.0
+    };
 
     let cx = cos_phi * cx1 - sin_phi * cy1 + (sx + ex) / 2.0;
     let cy = sin_phi * cx1 + cos_phi * cy1 + (sy + ey) / 2.0;
@@ -383,7 +406,10 @@ fn arc_mid_point(
 
     let lx = rx * theta_mid.cos();
     let ly = ry * theta_mid.sin();
-    (cos_phi * lx - sin_phi * ly + cx, sin_phi * lx + cos_phi * ly + cy)
+    (
+        cos_phi * lx - sin_phi * ly + cx,
+        sin_phi * lx + cos_phi * ly + cy,
+    )
 }
 
 fn convert_arcs(symbol: &EeSymbol, bbox: EeBbox) -> Vec<KiArc> {
@@ -391,8 +417,19 @@ fn convert_arcs(symbol: &EeSymbol, bbox: EeBbox) -> Vec<KiArc> {
     let mut arcs = Vec::new();
     for arc in &symbol.arcs {
         let (
-            Some(SvgCommand::MoveTo { x: start_x, y: start_y }),
-            Some(SvgCommand::Arc { radius_x, radius_y, x_axis_rotation, large_arc, sweep, end_x, end_y }),
+            Some(SvgCommand::MoveTo {
+                x: start_x,
+                y: start_y,
+            }),
+            Some(SvgCommand::Arc {
+                radius_x,
+                radius_y,
+                x_axis_rotation,
+                large_arc,
+                sweep,
+                end_x,
+                end_y,
+            }),
         ) = (arc.path.first(), arc.path.get(1))
         else {
             continue;
@@ -426,7 +463,12 @@ fn convert_arcs(symbol: &EeSymbol, bbox: EeBbox) -> Vec<KiArc> {
 
 /// `convert_ee_polylines`: a polygon, or a filled polyline, is closed back
 /// to its first point.
-fn convert_polyline(points: &str, filled: bool, is_polygon: bool, bbox: EeBbox) -> Option<KiPolygon> {
+fn convert_polyline(
+    points: &str,
+    filled: bool,
+    is_polygon: bool,
+    bbox: EeBbox,
+) -> Option<KiPolygon> {
     let raw: Vec<f64> = points
         .split_whitespace()
         .map(|p| crate::easyeda::values::py_float(p).unwrap_or(f64::NAN))
@@ -434,8 +476,17 @@ fn convert_polyline(points: &str, filled: bool, is_polygon: bool, bbox: EeBbox) 
     if raw.iter().any(|v| v.is_nan()) {
         return None;
     }
-    let mut xs: Vec<f64> = raw.iter().step_by(2).map(|x| px_to_mm(x - bbox.x)).collect();
-    let mut ys: Vec<f64> = raw.iter().skip(1).step_by(2).map(|y| -px_to_mm(y - bbox.y)).collect();
+    let mut xs: Vec<f64> = raw
+        .iter()
+        .step_by(2)
+        .map(|x| px_to_mm(x - bbox.x))
+        .collect();
+    let mut ys: Vec<f64> = raw
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .map(|y| -px_to_mm(y - bbox.y))
+        .collect();
     if xs.is_empty() || ys.is_empty() {
         return None;
     }
@@ -460,7 +511,10 @@ fn convert_paths(symbol: &EeSymbol, bbox: EeBbox) -> (Vec<KiPolygon>, Vec<KiBezi
     fn flush(poly: &mut Vec<[f64; 2]>, polygons: &mut Vec<KiPolygon>) {
         if poly.len() >= 2 {
             let is_closed = poly[0] == poly[poly.len() - 1];
-            polygons.push(KiPolygon { points: poly.clone(), is_closed });
+            polygons.push(KiPolygon {
+                points: poly.clone(),
+                is_closed,
+            });
         }
         poly.clear();
     }
@@ -503,7 +557,12 @@ fn convert_paths(symbol: &EeSymbol, bbox: EeBbox) -> (Vec<KiPolygon>, Vec<KiBezi
                     let Some(v) = values else { break };
                     flush(&mut poly, &mut polygons);
                     beziers.push(KiBezier {
-                        points: vec![to_ki(cur.0, cur.1), to_ki(v[0], v[1]), to_ki(v[2], v[3]), to_ki(v[4], v[5])],
+                        points: vec![
+                            to_ki(cur.0, cur.1),
+                            to_ki(v[0], v[1]),
+                            to_ki(v[2], v[3]),
+                            to_ki(v[4], v[5]),
+                        ],
                     });
                     cur = (v[4], v[5]);
                     poly.push(to_ki(cur.0, cur.1));
@@ -520,7 +579,12 @@ fn convert_paths(symbol: &EeSymbol, bbox: EeBbox) -> (Vec<KiPolygon>, Vec<KiBezi
                     let cy2 = qy + 2.0 / 3.0 * (qy1 - qy);
                     flush(&mut poly, &mut polygons);
                     beziers.push(KiBezier {
-                        points: vec![to_ki(cur.0, cur.1), to_ki(cx1, cy1), to_ki(cx2, cy2), to_ki(qx, qy)],
+                        points: vec![
+                            to_ki(cur.0, cur.1),
+                            to_ki(cx1, cy1),
+                            to_ki(cx2, cy2),
+                            to_ki(qx, qy),
+                        ],
                     });
                     cur = (qx, qy);
                     poly.push(to_ki(cur.0, cur.1));
@@ -552,7 +616,10 @@ fn property(key: &str, value: &str, id: u32, pos_y: f64, hide: bool, version: u3
     } else {
         (
             "",
-            format!("(effects (font (size {font} {font}) ) {})", if hide { "hide" } else { "" }),
+            format!(
+                "(effects (font (size {font} {font}) ) {})",
+                if hide { "hide" } else { "" }
+            ),
         )
     };
     let raw = format!(
@@ -565,10 +632,21 @@ fn property(key: &str, value: &str, id: u32, pos_y: f64, hide: bool, version: u3
 }
 
 fn render_properties(info: &KiInfo, y_low: f64, y_high: f64, version: u32) -> Vec<String> {
-    let description_key = if version >= VERSION_20230620 { "Description" } else { "ki_description" };
+    let description_key = if version >= VERSION_20230620 {
+        "Description"
+    } else {
+        "ki_description"
+    };
     let mut offset = FIELD_OFFSET_START;
     let mut out = vec![
-        property("Reference", &info.prefix, 0, y_high + offset, false, version),
+        property(
+            "Reference",
+            &info.prefix,
+            0,
+            y_high + offset,
+            false,
+            version,
+        ),
         property("Value", &info.name, 1, y_low - offset, false, version),
     ];
     let optional = [
@@ -675,7 +753,11 @@ fn render_graphics(ki: &KiSymbol, version: u32) -> Vec<String> {
             // Formats before 20220914 have no bezier: a straight line from
             // the first point to the last stands in for it.
             let start = b.points.first().copied().unwrap_or([0.0, 0.0]);
-            let end = if b.points.len() > 1 { b.points[b.points.len() - 1] } else { start };
+            let end = if b.points.len() > 1 {
+                b.points[b.points.len() - 1]
+            } else {
+                start
+            };
             out.push(format!(
                 "\n            (polyline\n              (pts {} {})\n              (stroke (width 0) (type default))\n              (fill (type none))\n            )",
                 xy(start),
@@ -698,8 +780,18 @@ fn render_graphics(ki: &KiSymbol, version: u32) -> Vec<String> {
 }
 
 fn render(ki: &KiSymbol, version: u32) -> String {
-    let y_low = ki.pins.iter().map(|p| p.pos_y).reduce(f64::min).unwrap_or(0.0);
-    let y_high = ki.pins.iter().map(|p| p.pos_y).reduce(f64::max).unwrap_or(0.0);
+    let y_low = ki
+        .pins
+        .iter()
+        .map(|p| p.pos_y)
+        .reduce(f64::min)
+        .unwrap_or(0.0);
+    let y_high = ki
+        .pins
+        .iter()
+        .map(|p| p.pos_y)
+        .reduce(f64::max)
+        .unwrap_or(0.0);
     let properties = render_properties(&ki.info, y_low, y_high, version).concat();
     let graphics = render_graphics(ki, version).concat();
     let pins: String = ki.pins.iter().map(render_pin).collect();
@@ -747,11 +839,10 @@ fn integrate_units(main: &str, units: &[String], id: &str) -> String {
     let mut bodies = Vec::new();
     for (index, unit) in units.iter().enumerate() {
         if let Ok(Some(found)) = unit_pattern.find(unit) {
-            bodies.push(
-                found
-                    .as_str()
-                    .replace(&format!("\"{id}_0_1\""), &format!("\"{id}_{}_1\"", index + 1)),
-            );
+            bodies.push(found.as_str().replace(
+                &format!("\"{id}_0_1\""),
+                &format!("\"{id}_{}_1\"", index + 1),
+            ));
         }
     }
     if bodies.is_empty() {
@@ -791,12 +882,50 @@ pub fn write_into_library(existing: Option<&str>, name: &str, content: &str) -> 
     let pattern = symbol_pattern(name);
     let updated = if pattern.is_match(&current).unwrap_or(false) {
         pattern
-            .replace_all(&current, fancy_regex::NoExpand(content.trim_end_matches('\n')))
+            .replace_all(
+                &current,
+                fancy_regex::NoExpand(content.trim_end_matches('\n')),
+            )
             .into_owned()
     } else {
         let position = current.rfind(')')?;
         let separator = if content.ends_with('\n') { "" } else { "\n" };
-        format!("{}{content}{separator}{}", &current[..position], &current[position..])
+        format!(
+            "{}{content}{separator}{}",
+            &current[..position],
+            &current[position..]
+        )
     };
-    Some(updated.replace("(generator kicad_symbol_editor)", &format!("(generator {GENERATOR})")))
+    Some(updated.replace(
+        "(generator kicad_symbol_editor)",
+        &format!("(generator {GENERATOR})"),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_with_spaces_is_found_under_its_stored_name() {
+        let content = "\n  (symbol \"AB_C\"\n    (in_bom yes)\n  )";
+        let library = write_into_library(None, "A B/C", content).unwrap();
+        assert!(library_contains(&library, "A B/C"));
+        let replaced = write_into_library(Some(&library), "A B/C", content).unwrap();
+        assert_eq!(replaced.matches("(symbol \"AB_C\"").count(), 1);
+    }
+
+    #[test]
+    fn the_library_version_decides_the_format() {
+        assert_eq!(library_version(None), VERSION_20211014);
+        assert_eq!(
+            library_version(Some("(kicad_symbol_lib (version 20231120)")),
+            VERSION_20231120
+        );
+        assert_eq!(
+            library_version(Some("(kicad_symbol_lib (version 20250101)")),
+            VERSION_20241209
+        );
+        assert!(write_into_library(Some("not a library"), "X", "\n  (symbol \"X\")").is_none());
+    }
 }

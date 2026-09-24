@@ -51,7 +51,10 @@ impl Client {
             .http
             .get(url)
             .header("Accept", "application/json, text/javascript, */*; q=0.01")
-            .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .header(
+                "Content-Type",
+                "application/x-www-form-urlencoded; charset=UTF-8",
+            )
             .header("Referer", "https://easyeda.com/");
         let body = match self.send(request).await? {
             Some(body) => body,
@@ -66,12 +69,19 @@ impl Client {
             if response.get("code").and_then(Value::as_i64) == Some(404) {
                 return Err(FetchError::PartNotFound);
             }
-            let message = response.get("message").and_then(Value::as_str).unwrap_or("no message");
-            return Err(FetchError::BadResponse(format!("EasyEDA reported: {message}")));
+            let message = response
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("no message");
+            return Err(FetchError::BadResponse(format!(
+                "EasyEDA reported: {message}"
+            )));
         }
         match response.get("result") {
             Some(result) if result.is_object() => Ok(result.clone()),
-            _ => Err(FetchError::BadResponse("the response has no part data".to_string())),
+            _ => Err(FetchError::BadResponse(
+                "the response has no part data".to_string(),
+            )),
         }
     }
 
@@ -139,7 +149,9 @@ fn decode_text(body: &[u8]) -> Result<String, FetchError> {
         let mut text = String::new();
         flate2::read::GzDecoder::new(body)
             .read_to_string(&mut text)
-            .map_err(|error| FetchError::BadResponse(format!("gzip body could not be read: {error}")))?;
+            .map_err(|error| {
+                FetchError::BadResponse(format!("gzip body could not be read: {error}"))
+            })?;
         return Ok(text);
     }
     Ok(String::from_utf8_lossy(body).into_owned())
