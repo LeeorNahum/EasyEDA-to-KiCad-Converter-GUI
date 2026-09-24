@@ -11,6 +11,13 @@ test("single part mode follows the part", () => {
   assert.equal(suggest(edited, "singlePart", "C2", "Other_C2").value, "Other_C2");
 });
 
+test("single part mode drops the last part's name while the next is looked up", () => {
+  const first = suggest(emptyLibraryName, "singlePart", "C1", "Part_C1");
+  const looking = suggest(first, "singlePart", "C2", "");
+  assert.equal(looking.value, "");
+  assert.equal(suggest(looking, "singlePart", "C2", "Other_C2").value, "Other_C2");
+});
+
 test("custom library mode keeps a typed name across parts", () => {
   const typed = edit("Passives", "C1", "Part_C1");
   assert.equal(suggest(typed, "customLibrary", "C2", "Other_C2").value, "Passives");

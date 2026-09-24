@@ -3,7 +3,8 @@
  *
  * In Single Part Folder mode every part gets its own folder, so the name
  * follows the part: a new part replaces it with that part's suggested name,
- * and an edit holds only while the same part stays in the field. In Custom
+ * or clears it until one arrives, and an edit holds only while the same
+ * part stays in the field. In Custom
  * Library mode the name is the shared library several parts go into, so it
  * stays as typed and is only filled in when empty.
  */
@@ -26,6 +27,9 @@ export function suggest(
   part: string,
   suggestion: string,
 ): LibraryName {
+  if (mode === "singlePart" && state.part !== part && suggestion === "") {
+    return { value: "", edited: false, part };
+  }
   if (suggestion === "") {
     return state;
   }

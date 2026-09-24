@@ -6,11 +6,6 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type LibraryMode = "singlePart" | "customLibrary";
 
-export interface AppInfo {
-  version: string;
-  defaultOutputFolder: string;
-}
-
 export interface PartSummary {
   lcscId: string;
   title: string;
@@ -67,7 +62,7 @@ export function asProblem(error: unknown): Problem {
   };
 }
 
-export const appInfo = () => invoke<AppInfo>("app_info");
+export const defaultOutputFolder = () => invoke<string>("default_output_folder");
 
 export const lookUpPart = (lcscId: string) => invoke<PartSummary>("look_up_part", { lcscId });
 

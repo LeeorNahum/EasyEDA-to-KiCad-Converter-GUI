@@ -9,7 +9,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(Parts::default())
         .invoke_handler(tauri::generate_handler![
-            commands::app_info,
+            commands::default_output_folder,
             commands::look_up_part,
             commands::plan_destination,
             commands::convert_part,

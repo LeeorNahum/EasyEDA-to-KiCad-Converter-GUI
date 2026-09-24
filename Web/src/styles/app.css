@@ -80,23 +80,45 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* One scrolling region, so the window itself never scrolls sideways. */
+/*
+ * The window is one viewport tall: the form scrolls, and the bar with
+ * Convert and its result stays at the bottom where it is always visible.
+ */
 .window {
   height: 100%;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
 }
 
-.form {
+.scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.content,
+.bar-content {
   width: 100%;
   max-width: var(--content-width);
   margin: 0 auto;
-  padding: var(--space-4) var(--space-4) var(--space-3);
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+.bar {
+  flex: 0 0 auto;
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  scrollbar-gutter: stable;
+  overflow: hidden;
+}
+
+.bar-content {
+  padding-block: var(--space-3);
+  gap: var(--space-2);
 }
 
 .section {
@@ -287,16 +309,13 @@ body {
 }
 
 .path {
+  display: block;
   font-family: var(--font-mono);
   font-size: var(--text-small);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   user-select: text;
-}
-
-.actions {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
 }
 
 .convert {
@@ -356,11 +375,19 @@ body {
 }
 
 .outcome.done {
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   background: var(--color-success-surface);
   border-radius: var(--radius);
   gap: var(--space-2);
   font-size: var(--text-body);
+}
+
+.done-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
 .done-title {
@@ -389,13 +416,5 @@ body {
 
 .problem-inline {
   color: var(--color-problem);
-  font-size: var(--text-small);
-}
-
-.footer {
-  margin-top: auto;
-  padding: 0 var(--space-4) var(--space-3);
-  text-align: center;
-  color: var(--color-text-muted);
   font-size: var(--text-small);
 }

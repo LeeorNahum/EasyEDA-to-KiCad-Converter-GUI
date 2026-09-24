@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -44,21 +43,10 @@ impl Parts {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppInfo {
-    version: String,
-    default_output_folder: String,
-}
-
+/// The folder used when no output folder is chosen.
 #[tauri::command]
-pub fn app_info(app: AppHandle) -> AppInfo {
-    AppInfo {
-        version: app.package_info().version.to_string(),
-        default_output_folder: convert::default_output_folder()
-            .to_string_lossy()
-            .into_owned(),
-    }
+pub fn default_output_folder() -> String {
+    convert::default_output_folder().to_string_lossy().into_owned()
 }
 
 #[tauri::command]
