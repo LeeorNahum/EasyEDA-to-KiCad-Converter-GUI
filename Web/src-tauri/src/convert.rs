@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 use crate::easyeda::api::{Client, FetchError};
 use crate::easyeda::values::{json_text, or_else};
 use crate::easyeda::{footprint as ee_footprint, model3d as ee_model3d, symbol as ee_symbol};
-use crate::kicad::{self, footprint, model3d, sexpr, symbol};
+use crate::kicad::{footprint, model3d, sexpr, symbol};
 use crate::messages::{Item, Problem};
 
 /// How the library files are laid out under the output folder.
@@ -259,22 +259,22 @@ pub async fn convert(
         let ee = ee_symbol::import(component);
         let path = PathBuf::from(&destination.symbol_library);
         let existing = read_library(&path)?;
-        if let Some((text, stored)) = &existing {
-            let id = kicad::escape(&symbol::library_id(&ee.info.name));
-            if stored.contains(&id) {
-                // A symbol this app would replace, laid out so it cannot be
-                // found to replace, is refused rather than duplicated.
-                if !symbol::library_contains(text, &ee.info.name) {
+        if let Some(text) = &existing {
+            match symbol::stored(text, &ee.info.name) {
+                symbol::Stored::Absent => {}
+                symbol::Stored::Replaceable => {
+                    if !request.overwrite {
+                        conflicts.push(format!("the symbol {}", ee.info.name));
+                    }
+                }
+                // Refused rather than risk a duplicate or a broken library.
+                symbol::Stored::Unsafe => {
                     return Err(Problem::LibraryLayout {
                         path: destination.symbol_library.clone(),
                     });
                 }
-                if !request.overwrite {
-                    conflicts.push(format!("the symbol {}", ee.info.name));
-                }
             }
         }
-        let existing = existing.map(|(text, _)| text);
         let version = symbol::library_version(existing.as_deref());
         let content = symbol::export(&ee, library, version);
         if sexpr::has_unreadable_number(&content) {
@@ -396,11 +396,11 @@ pub async fn convert(
     })
 }
 
-/// An existing symbol library, with Windows line endings read as `\n`, and
-/// the names of the symbols in it, or `None` when there is no library yet.
+/// An existing symbol library, with Windows line endings read as `\n`, or
+/// `None` when there is no library yet.
 /// A file that is not one well-formed KiCad symbol library is refused
 /// rather than added to.
-fn read_library(path: &Path) -> Result<Option<(String, Vec<String>)>, Problem> {
+fn read_library(path: &Path) -> Result<Option<String>, Problem> {
     if !path.exists() {
         return Ok(None);
     }
@@ -416,10 +416,12 @@ fn read_library(path: &Path) -> Result<Option<(String, Vec<String>)>, Problem> {
     let text = String::from_utf8_lossy(&bytes)
         .replace("\r\n", "\n")
         .replace('\r', "\n");
-    let symbols = sexpr::library_symbols(&text).ok_or_else(|| Problem::NotASymbolLibrary {
-        path: display(path),
-    })?;
-    Ok(Some((text, symbols)))
+    if sexpr::library_symbols(&text).is_none() {
+        return Err(Problem::NotASymbolLibrary {
+            path: display(path),
+        });
+    }
+    Ok(Some(text))
 }
 
 /// Distinguishes this conversion's temporary files from any other's.
@@ -692,10 +694,7 @@ mod tests {
                 bytes: b"x".to_vec(),
             },
         ];
-        assert!(matches!(
-            commit(&outputs),
-            Err(Problem::WriteFailed { .. })
-        ));
+        assert!(matches!(commit(&outputs), Err(Problem::WriteFailed { .. })));
         assert_eq!(fs::read_to_string(&library).unwrap(), "old");
         let mut names: Vec<_> = fs::read_dir(&folder)
             .unwrap()

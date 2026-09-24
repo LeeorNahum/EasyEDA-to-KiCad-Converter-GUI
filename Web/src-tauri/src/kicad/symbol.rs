@@ -855,9 +855,48 @@ fn integrate_units(main: &str, units: &[String], id: &str) -> String {
         .into_owned()
 }
 
-/// Whether a library already holds a symbol stored under this name.
-pub fn library_contains(library: &str, name: &str) -> bool {
-    symbol_pattern(name).is_match(library).unwrap_or(false)
+/// Whether a library holds a symbol under a name, and whether it can be
+/// replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stored {
+    Absent,
+    /// Present, and the replacement finds exactly the whole symbol.
+    Replaceable,
+    /// Present, but laid out so the replacement would not cover exactly the
+    /// whole symbol, which could leave a duplicate or a broken library.
+    Unsafe,
+}
+
+/// Where `library` stands for a symbol named `name`. `library` must be a
+/// well-formed symbol library.
+pub fn stored(library: &str, name: &str) -> Stored {
+    let id = escape(&library_id(name));
+    let spans: Vec<_> = super::sexpr::library_symbols(library)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|symbol| symbol.name == id)
+        .map(|symbol| symbol.span)
+        .collect();
+    if spans.is_empty() {
+        return Stored::Absent;
+    }
+    // easyeda2kicad's pattern starts at the newline before the symbol and
+    // ends at its closing parenthesis. Every match must be exactly one of
+    // the symbols the reader found, and every such symbol must be matched.
+    let matched: Vec<_> = symbol_pattern(name)
+        .captures_iter(library)
+        .filter_map(Result::ok)
+        .filter_map(|captures| {
+            let whole = captures.get(0)?;
+            let indent = captures.get(1)?;
+            Some(indent.end()..whole.end())
+        })
+        .collect();
+    if matched == spans {
+        Stored::Replaceable
+    } else {
+        Stored::Unsafe
+    }
 }
 
 fn symbol_pattern(name: &str) -> FancyRegex {
@@ -910,9 +949,22 @@ mod tests {
     fn a_name_with_spaces_is_found_under_its_stored_name() {
         let content = "\n  (symbol \"AB_C\"\n    (in_bom yes)\n  )";
         let library = write_into_library(None, "A B/C", content).unwrap();
-        assert!(library_contains(&library, "A B/C"));
+        assert_eq!(stored(&library, "A B/C"), Stored::Replaceable);
         let replaced = write_into_library(Some(&library), "A B/C", content).unwrap();
         assert_eq!(replaced.matches("(symbol \"AB_C\"").count(), 1);
+    }
+
+    #[test]
+    fn a_symbol_the_pattern_cannot_bound_is_unsafe_to_replace() {
+        // Every line at one indentation: the pattern stops at the first
+        // closing parenthesis on a line of its own.
+        let flat = "(kicad_symbol_lib\n(symbol \"X\"\n(symbol \"X_0_1\"\n)\n)\n)";
+        assert_eq!(stored(flat, "X"), Stored::Unsafe);
+        let compact = "(kicad_symbol_lib (symbol \"X\" (in_bom yes)))";
+        assert_eq!(stored(compact, "X"), Stored::Unsafe);
+        let bare = "(kicad_symbol_lib\n  (symbol X\n  )\n)";
+        assert_eq!(stored(bare, "X"), Stored::Unsafe);
+        assert_eq!(stored(compact, "Y"), Stored::Absent);
     }
 
     #[test]
