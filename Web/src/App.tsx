@@ -158,6 +158,11 @@ export function App() {
     if (!(symbol || footprint || model)) {
       return "Choose at least one of Symbol, Footprint, or 3D model.";
     }
+    // A Single Part Folder name comes from the part, so it waits for the
+    // part's details rather than borrow the last part's name.
+    if (mode === "singlePart" && (lookup.state === "looking" || name.part !== part)) {
+      return "Waiting for the part's details.";
+    }
     if (name.value.trim() === "") return "Enter a library name.";
     if (planProblem) return planProblem.text;
     return null;
@@ -188,7 +193,9 @@ export function App() {
       }}
     >
       <div className="scroll">
-        <div className="content">
+        {/* The form holds still while a conversion runs, so its result
+            always describes what is on screen. */}
+        <fieldset className="content" disabled={converting}>
           <section className="section" aria-labelledby="part-heading">
             <h2 id="part-heading" className="section-title">
               Part
@@ -314,7 +321,7 @@ export function App() {
               />
             </div>
           </section>
-        </div>
+        </fieldset>
       </div>
 
       <div className="bar">

@@ -108,6 +108,7 @@ impl Reader<'_> {
                 }
             }
             Some(_) => {
+                let start = self.at;
                 while let Some(c) = self.text.get(self.at) {
                     if c.is_ascii_whitespace() || matches!(c, b'(' | b')') {
                         break;
@@ -116,6 +117,14 @@ impl Reader<'_> {
                         return Err(format!("quote inside a bare word at byte {}", self.at));
                     }
                     self.at += 1;
+                }
+                // A number KiCad cannot read, written where a coordinate belongs.
+                let word = String::from_utf8_lossy(&self.text[start..self.at]).to_lowercase();
+                if matches!(
+                    word.trim_start_matches(['-', '+']),
+                    "nan" | "inf" | "infinity"
+                ) {
+                    return Err(format!("the number {word} at byte {start}"));
                 }
                 Ok(Node::Atom)
             }

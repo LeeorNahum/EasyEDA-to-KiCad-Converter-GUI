@@ -1,13 +1,14 @@
 //! What one conversion writes, and where.
 //!
 //! `plan` turns the window's choices into file locations and is what the
-//! window shows as the destination. `convert` fetches the part, checks
-//! nothing would be overwritten by surprise, downloads the 3D model, and only
-//! then writes the files, so a failure part way through leaves the library
-//! as it was.
+//! window shows as the destination. `convert` checks that nothing would be
+//! overwritten by surprise, downloads the 3D model, and prepares every file
+//! before touching the library. It then writes them all or none: when one
+//! cannot be written, the ones already in place are put back as they were.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -344,11 +345,7 @@ pub async fn convert(
         return Err(Problem::AlreadyExists { items: conflicts });
     }
 
-    let mut written = Vec::new();
-    for output in outputs {
-        write_file(&output.path, &output.bytes)?;
-        written.push(display(&output.path));
-    }
+    let written = commit(&outputs)?;
     Ok(Report {
         destination,
         written,
@@ -357,30 +354,104 @@ pub async fn convert(
 }
 
 /// An existing symbol library's text with Windows line endings read as `\n`,
-/// or `None` when there is no library yet.
+/// or `None` when there is no library yet. A file that is not a KiCad
+/// symbol library is refused rather than added to.
 fn read_library(path: &Path) -> Result<Option<String>, Problem> {
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = fs::read(path).map_err(|error| write_failed(path, &error))?;
-    let text = String::from_utf8_lossy(&bytes);
-    Ok(Some(text.replace("\r\n", "\n").replace('\r', "\n")))
+    let bytes = fs::read(path).map_err(|error| Problem::ReadFailed {
+        path: display(path),
+        detail: error.to_string(),
+    })?;
+    let text = String::from_utf8_lossy(&bytes)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    if !text.trim_start().starts_with("(kicad_symbol_lib") {
+        return Err(Problem::NotASymbolLibrary {
+            path: display(path),
+        });
+    }
+    Ok(Some(text))
 }
 
-/// Writes through a sibling file and a rename, so an interrupted write never
-/// leaves a half-written library behind.
-fn write_file(path: &Path, bytes: &[u8]) -> Result<(), Problem> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| write_failed(parent, &error))?;
+/// Distinguishes this conversion's temporary files from any other's.
+static WRITE_RUN: AtomicU64 = AtomicU64::new(0);
+
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Writes every output or none of them. Each file is first written next to
+/// its destination. Only when all are written does each replace its
+/// destination, with the file it replaces kept aside until the end, so a
+/// failure puts every destination back as it was.
+fn commit(outputs: &[Output]) -> Result<Vec<String>, Problem> {
+    let run = WRITE_RUN.fetch_add(1, Ordering::Relaxed);
+    let tag = format!(".{}-{run}", std::process::id());
+
+    let mut staged: Vec<PathBuf> = Vec::new();
+    let discard = |paths: &[PathBuf]| {
+        for path in paths {
+            let _ = fs::remove_file(path);
+        }
+    };
+    for output in outputs {
+        let temporary = beside(&output.path, &format!("{tag}.tmp"));
+        let written = output
+            .path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&temporary, &output.bytes));
+        if let Err(error) = written {
+            discard(&staged);
+            let _ = fs::remove_file(&temporary);
+            return Err(write_failed(&output.path, &error));
+        }
+        staged.push(temporary);
     }
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    fs::write(&temporary, bytes).map_err(|error| write_failed(path, &error))?;
-    fs::rename(&temporary, path).map_err(|error| {
-        let _ = fs::remove_file(&temporary);
-        write_failed(path, &error)
-    })
+
+    // (destination, the file it replaced, moved aside)
+    let mut placed: Vec<(&Path, Option<PathBuf>)> = Vec::new();
+    let undo = |placed: &[(&Path, Option<PathBuf>)]| {
+        for (destination, previous) in placed.iter().rev() {
+            let _ = fs::remove_file(destination);
+            if let Some(previous) = previous {
+                let _ = fs::rename(previous, destination);
+            }
+        }
+    };
+    for (index, output) in outputs.iter().enumerate() {
+        let destination = output.path.as_path();
+        let previous = if destination.exists() {
+            let aside = beside(destination, &format!("{tag}.old"));
+            if let Err(error) = fs::rename(destination, &aside) {
+                undo(&placed);
+                discard(&staged[index..]);
+                return Err(write_failed(destination, &error));
+            }
+            Some(aside)
+        } else {
+            None
+        };
+        if let Err(error) = fs::rename(&staged[index], destination) {
+            if let Some(previous) = &previous {
+                let _ = fs::rename(previous, destination);
+            }
+            undo(&placed);
+            discard(&staged[index..]);
+            return Err(write_failed(destination, &error));
+        }
+        placed.push((destination, previous));
+    }
+    for (_, previous) in &placed {
+        if let Some(previous) = previous {
+            let _ = fs::remove_file(previous);
+        }
+    }
+    Ok(outputs.iter().map(|output| display(&output.path)).collect())
 }
 
 fn write_failed(path: &Path, error: &std::io::Error) -> Problem {
@@ -406,6 +477,36 @@ mod tests {
         );
         assert_eq!(sanitize_library_name("  a/b  c__d. "), "a_b_c_d");
         assert_eq!(sanitize_library_name("..."), "easyeda2kicad");
+    }
+
+    #[test]
+    fn a_failed_write_changes_nothing() {
+        let folder = std::env::temp_dir().join(format!("easyeda-commit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        let library = folder.join("lib.kicad_sym");
+        fs::write(&library, "old").unwrap();
+        // A file where a folder must go makes the second write fail.
+        fs::write(folder.join("lib.pretty"), "").unwrap();
+        let outputs = [
+            Output {
+                path: library.clone(),
+                bytes: b"new".to_vec(),
+            },
+            Output {
+                path: folder.join("lib.pretty").join("part.kicad_mod"),
+                bytes: b"x".to_vec(),
+            },
+        ];
+        assert!(matches!(commit(&outputs), Err(Problem::WriteFailed { .. })));
+        assert_eq!(fs::read_to_string(&library).unwrap(), "old");
+        let mut names: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["lib.kicad_sym", "lib.pretty"]);
+        fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

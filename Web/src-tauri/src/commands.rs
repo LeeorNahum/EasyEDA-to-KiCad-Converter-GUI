@@ -18,6 +18,9 @@ use crate::messages::{Message, Problem};
 pub struct Parts {
     client: Client,
     fetched: Mutex<HashMap<String, Value>>,
+    /// Held for the whole of a conversion, so two never read and rewrite the
+    /// same library at once.
+    converting: tokio::sync::Mutex<()>,
 }
 
 impl Parts {
@@ -46,7 +49,9 @@ impl Parts {
 /// The folder used when no output folder is chosen.
 #[tauri::command]
 pub fn default_output_folder() -> String {
-    convert::default_output_folder().to_string_lossy().into_owned()
+    convert::default_output_folder()
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[tauri::command]
@@ -70,6 +75,7 @@ pub fn plan_destination(request: Request) -> Result<Destination, Message> {
 
 #[tauri::command]
 pub async fn convert_part(request: Request, parts: State<'_, Parts>) -> Result<Report, Message> {
+    let _converting = parts.converting.lock().await;
     let lcsc_id = convert::normalize_part_number(&request.lcsc_id)
         .ok_or(Problem::InvalidPartNumber.into_message())?;
     let component = parts

@@ -86,4 +86,4 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm format:check && pnpm check:emda
 cd src-tauri && cargo test && cargo clippy --all-targets
 ```
 
-`cargo test --test wellformed -- --ignored` also converts real parts from EasyEDA and checks every file it writes. The `saved_parts` example in `Web/src-tauri/examples` saves parts to disk in easyeda2kicad's cache layout and converts them from there, which is how the output is compared with easyeda2kicad.py on identical input.
+`cargo test --test wellformed live -- --ignored` also converts real parts from EasyEDA and checks every file it writes. `cargo test --test wellformed produced -- --ignored`, with `WELLFORMED_DIR` set to a folder, checks every symbol library and footprint under it. The `saved_parts` example in `Web/src-tauri/examples` saves parts to disk in easyeda2kicad's cache layout and converts them from there, which is how the output is compared with easyeda2kicad.py on identical input.

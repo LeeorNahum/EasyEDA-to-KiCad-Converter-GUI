@@ -364,7 +364,13 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
             _ => "custom",
         };
         let mut pad = Pad {
-            kind: if through_hole { "thru_hole" } else { "smd" },
+            // easyeda2kicad drops the plating flag and plates every hole.
+            // A pad EasyEDA marks unplated stays unplated here.
+            kind: match (through_hole, ee.plated) {
+                (false, _) => "smd",
+                (true, true) => "thru_hole",
+                (true, false) => "np_thru_hole",
+            },
             shape,
             x: ee.center_x - bbox.x,
             y: ee.center_y - bbox.y,
@@ -385,15 +391,17 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
         let points: Vec<f64> = ee.points.split_whitespace().map(fp_to_ki).collect();
         if shape == "custom" && !points.is_empty() {
             // The polygon carries the pad's shape and rotation, so the base
-            // pad shrinks to KiCad's minimum and loses its own rotation.
+            // pad shrinks to KiCad's minimum and loses its own rotation. The
+            // polygon is filled with no outline: easyeda2kicad's 0.1 mm
+            // outline grows the copper by 0.05 mm on every edge.
             pad.width = 0.005;
             pad.height = 0.005;
             pad.orientation = 0.0;
+            // A coordinate without its partner is left out.
             let path: String = points
-                .chunks(2)
+                .chunks_exact(2)
                 .map(|pair| {
-                    let x = pair[0];
-                    let y = pair.get(1).copied().unwrap_or(f64::NAN);
+                    let (x, y) = (pair[0], pair[1]);
                     format!(
                         "(xy {} {})",
                         fixed(x - bbox.x - pad.x, 6),
@@ -402,7 +410,7 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
                 })
                 .collect();
             pad.polygon = format!(
-                "\n\t\t(primitives \n\t\t\t(gr_poly \n\t\t\t\t(pts {path}\n\t\t\t\t) \n\t\t\t\t(width 0.1) \n\t\t\t)\n\t\t)\n\t"
+                "\n\t\t(primitives \n\t\t\t(gr_poly \n\t\t\t\t(pts {path}\n\t\t\t\t) \n\t\t\t\t(width 0) \n\t\t\t)\n\t\t)\n\t"
             );
         }
         pads.push(pad);
@@ -439,11 +447,12 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
         let width = track.stroke_width.max(0.01);
         let points: Vec<f64> = track.points.split_whitespace().map(fp_to_ki).collect();
         let mut i = 0;
-        while i + 2 < points.len() {
-            let get = |k: usize| points.get(k).copied().unwrap_or(f64::NAN);
+        // Each pair of consecutive points is one segment. A coordinate
+        // without its partner ends the track.
+        while i + 3 < points.len() {
             out.push_str(&line(
-                (get(i) - bbox.x, get(i + 1) - bbox.y),
-                (get(i + 2) - bbox.x, get(i + 3) - bbox.y),
+                (points[i] - bbox.x, points[i + 1] - bbox.y),
+                (points[i + 2] - bbox.x, points[i + 3] - bbox.y),
                 layers,
                 width,
             ));
@@ -479,10 +488,12 @@ pub fn export(footprint: &EeFootprint, model_directory: &str) -> String {
         ));
     }
 
+    // A HOLE is a bare mechanical hole, so it is unplated. easyeda2kicad
+    // writes it as a plated hole.
     for hole in &footprint.holes {
         let size = fixed(hole.radius * 2.0, 2);
         out.push_str(&format!(
-            "\t(pad \"\" thru_hole circle (at {} {}) (size {size} {size}) (drill {size}) (layers *.Cu *.Mask))\n",
+            "\t(pad \"\" np_thru_hole circle (at {} {}) (size {size} {size}) (drill {size}) (layers *.Cu *.Mask))\n",
             fixed(hole.center_x - bbox.x, 2),
             fixed(hole.center_y - bbox.y, 2),
         ));

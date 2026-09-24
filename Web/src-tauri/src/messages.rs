@@ -23,6 +23,7 @@ pub enum Problem {
     OutputFolderMissing { path: String },
     AlreadyExists { items: Vec<String> },
     NotASymbolLibrary { path: String },
+    ReadFailed { path: String, detail: String },
     WriteFailed { path: String, detail: String },
     OpenFailed { path: String, detail: String },
 }
@@ -119,6 +120,11 @@ impl Problem {
                 "not-a-symbol-library",
                 format!("{path} is not a KiCad symbol library, so nothing was added to it. Choose another library name."),
                 None,
+            ),
+            Problem::ReadFailed { path, detail } => (
+                "read-failed",
+                format!("Could not read {path}. Check that the file is not open in another program."),
+                Some(detail),
             ),
             Problem::WriteFailed { path, detail } => (
                 "write-failed",

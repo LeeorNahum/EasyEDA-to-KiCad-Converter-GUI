@@ -52,6 +52,8 @@ pub struct EePad {
     pub points: String,
     pub rotation: f64,
     pub hole_length: f64,
+    /// `N` in the plating field marks an unplated hole.
+    pub plated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +212,7 @@ pub fn import(component: &Value) -> EeFootprint {
                 points: field(f, 9).to_string(),
                 rotation: float_or(field(f, 10), 0.0),
                 hole_length: mm(field(f, 12)),
+                plated: !field(f, 14).trim().eq_ignore_ascii_case("n"),
             }),
             "TRACK" => footprint.tracks.push(EeTrack {
                 stroke_width: mm(field(f, 0)),
