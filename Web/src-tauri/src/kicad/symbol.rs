@@ -181,22 +181,15 @@ fn snap_bbox(bbox: EeBbox) -> EeBbox {
     }
 }
 
-fn to_kicad(symbol: &EeSymbol, footprint_library: &str) -> KiSymbol {
+fn to_kicad(symbol: &EeSymbol, footprint: &str) -> KiSymbol {
     let bbox = snap_bbox(symbol.bbox);
     let info = &symbol.info;
-    // easyeda2kicad writes `library:` even when the part names no package.
-    // An empty package stays empty here, so no footprint field points nowhere.
-    let package = if info.package.is_empty() {
-        String::new()
-    } else {
-        format!("{footprint_library}:{}", super::file_safe(&info.package))
-    };
 
     let mut ki = KiSymbol {
         info: KiInfo {
             name: info.name.clone(),
             prefix: info.prefix.replace('?', ""),
-            package,
+            package: footprint.to_string(),
             manufacturer: info.manufacturer.clone(),
             datasheet: info.datasheet.clone(),
             lcsc_id: info.lcsc_id.clone(),
@@ -810,17 +803,33 @@ fn render(ki: &KiSymbol, version: u32) -> String {
     BLANK_LINES.replace_all(&component, "\n").into_owned()
 }
 
+/// The symbol's Footprint field: `library:footprint`, the footprint KiCad
+/// places for it, named by its library nickname and its name in that
+/// library.
+///
+/// easyeda2kicad names the footprint after the symbol's package, and writes
+/// `library:` even when the part names no package. Here the footprint's own
+/// name is used when the part has one, which is the name its file is saved
+/// under, and with neither the field stays empty rather than point nowhere.
+pub fn footprint_field(symbol: &EeSymbol, library: &str, footprint: Option<&str>) -> String {
+    match footprint {
+        Some(name) => format!("{library}:{name}"),
+        None if symbol.info.package.is_empty() => String::new(),
+        None => format!("{library}:{}", super::file_safe(&symbol.info.package)),
+    }
+}
+
 /// The symbol, with its units when it has several, as the text that goes
-/// into a library.
-pub fn export(symbol: &EeSymbol, footprint_library: &str, version: u32) -> String {
-    let main = render(&to_kicad(symbol, footprint_library), version);
+/// into a library. `footprint` is its Footprint field.
+pub fn export(symbol: &EeSymbol, footprint: &str, version: u32) -> String {
+    let main = render(&to_kicad(symbol, footprint), version);
     if symbol.sub_symbols.is_empty() {
         return main;
     }
     let units: Vec<String> = symbol
         .sub_symbols
         .iter()
-        .map(|sub| export(sub, footprint_library, version))
+        .map(|sub| export(sub, footprint, version))
         .collect();
     integrate_units(&main, &units, &library_id(&symbol.info.name))
 }

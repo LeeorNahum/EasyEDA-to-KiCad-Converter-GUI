@@ -1,7 +1,6 @@
 //! What the window can ask for.
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
 use std::sync::Mutex;
 
 use serde_json::Value;
@@ -11,6 +10,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::convert::{self, Destination, PartSummary, Report, Request};
 use crate::easyeda::api::Client;
+use crate::lock;
 use crate::messages::{Message, Problem};
 
 /// The EasyEDA client and the parts already fetched this session, so a part
@@ -71,46 +71,20 @@ pub fn plan_destination(request: Request) -> Result<Destination, Message> {
     convert::plan(&request).map_err(Problem::into_message)
 }
 
-/// An exclusive lock on a file in the app's local data folder, held for the
-/// whole of a conversion, so two conversions, in this window or in another
-/// copy of the app, never read and rewrite the same library at once. The
-/// system releases it when the file closes, even if the app ends abruptly.
-async fn conversion_lock(app: &AppHandle) -> Result<File, Problem> {
-    let folder = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|error| Problem::WriteFailed {
-            path: "the app's data folder".to_string(),
-            detail: error.to_string(),
-        })?;
-    let path = folder.join("conversion.lock");
-    let shown = path.to_string_lossy().into_owned();
-    tauri::async_runtime::spawn_blocking(move || {
-        fs::create_dir_all(&folder)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)?;
-        file.lock()?;
-        Ok(file)
-    })
-    .await
-    .map_err(|error| std::io::Error::other(error.to_string()))
-    .and_then(|locked| locked)
-    .map_err(|error: std::io::Error| Problem::WriteFailed {
-        path: shown,
-        detail: error.to_string(),
-    })
-}
-
 #[tauri::command]
-pub async fn convert_part(
-    app: AppHandle,
-    request: Request,
-    parts: State<'_, Parts>,
-) -> Result<Report, Message> {
-    let _lock = conversion_lock(&app).await.map_err(Problem::into_message)?;
+pub async fn convert_part(request: Request, parts: State<'_, Parts>) -> Result<Report, Message> {
+    // Held for the whole conversion, so no other conversion, in this window
+    // or on the command line, reads and rewrites the same files meanwhile.
+    let _lock = tauri::async_runtime::spawn_blocking(lock::hold)
+        .await
+        .map_err(|error| {
+            Problem::WriteFailed {
+                path: "the conversion lock".to_string(),
+                detail: error.to_string(),
+            }
+            .into_message()
+        })?
+        .map_err(Problem::into_message)?;
     let lcsc_id = convert::normalize_part_number(&request.lcsc_id)
         .ok_or(Problem::InvalidPartNumber.into_message())?;
     let component = parts

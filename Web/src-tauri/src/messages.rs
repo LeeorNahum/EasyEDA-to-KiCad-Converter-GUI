@@ -1,13 +1,22 @@
-//! Every outcome the window can show, and the only place one becomes words.
+//! Every outcome the window and the command line can show, and the only
+//! place one becomes words.
 //!
-//! A problem carries the facts that decide it. `into_message` turns it into
-//! one sentence that names what failed and the next step, plus the raw
-//! detail behind it when there is one, which the window shows below the
-//! sentence in smaller type.
+//! A problem carries the facts that decide it. `describe` turns it into one
+//! sentence that names what failed and the next step, in the terms of the
+//! window or the command line, plus the raw detail behind it when there is
+//! one, which the window shows below the sentence in smaller type.
 
 use serde::Serialize;
 
 use crate::easyeda::api::FetchError;
+use crate::kicad::lib_table;
+
+/// Where a message is read, which decides how it names the controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Window,
+    CommandLine,
+}
 
 /// What a conversion writes, for problems about one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,12 +54,31 @@ pub enum Problem {
     },
     AlreadyExists {
         items: Vec<String>,
+        /// The symbol, `library:symbol`, when the part is in a KiCad project
+        /// that already lists its libraries, so it can be placed as it is.
+        ready: Option<String>,
+        /// What the project's library tables need before the part can be
+        /// placed, when something does.
+        notes: Vec<String>,
     },
     NotASymbolLibrary {
         path: String,
     },
     LibraryLayout {
         path: String,
+    },
+    NotALibraryTable {
+        path: String,
+    },
+    /// A file the conversion read changed before it was written back.
+    ChangedMeanwhile {
+        path: String,
+    },
+    /// The project's table has another library under the name this one needs.
+    LibraryNameTaken {
+        kind: lib_table::Kind,
+        name: String,
+        uri: String,
     },
     UnreadablePart {
         lcsc_id: String,
@@ -105,7 +133,22 @@ impl Problem {
         }
     }
 
+    /// The message as the window shows it.
     pub fn into_message(self) -> Message {
+        self.describe(Surface::Window)
+    }
+
+    pub fn describe(self, surface: Surface) -> Message {
+        let window = surface == Surface::Window;
+        // How to convert all but the items named: the window's switches, or
+        // the command line's names for them.
+        let leave_out = |switches: &str, names: &str, rest: &str| {
+            if window {
+                format!("Turn off {switches} to convert {rest}.")
+            } else {
+                format!("Leave {names} out of --only to convert {rest}.")
+            }
+        };
         let (code, text, detail) = match self {
             Problem::InvalidPartNumber => (
                 "invalid-part-number",
@@ -134,12 +177,18 @@ impl Problem {
             ),
             Problem::NoSymbol { lcsc_id } => (
                 "no-symbol",
-                format!("EasyEDA has no schematic symbol for {lcsc_id}. Turn off Symbol to convert the rest."),
+                format!(
+                    "EasyEDA has no schematic symbol for {lcsc_id}. {}",
+                    leave_out("Symbol", "symbol", "the rest")
+                ),
                 None,
             ),
             Problem::NoFootprint { lcsc_id } => (
                 "no-footprint",
-                format!("EasyEDA has no footprint for {lcsc_id}. Turn off Footprint and 3D model to convert the symbol."),
+                format!(
+                    "EasyEDA has no footprint for {lcsc_id}. {}",
+                    leave_out("Footprint and 3D model", "footprint and model", "the symbol")
+                ),
                 None,
             ),
             Problem::NothingSelected => (
@@ -154,18 +203,39 @@ impl Problem {
             ),
             Problem::OutputFolderMissing { path } => (
                 "output-folder-missing",
-                format!("The output folder {path} does not exist. Choose a folder with Browse."),
+                if window {
+                    format!("The output folder {path} does not exist. Choose a folder with Browse.")
+                } else {
+                    format!("The output folder {path} does not exist. Create it, or name another with --output.")
+                },
                 None,
             ),
-            Problem::AlreadyExists { items } => (
-                "already-exists",
-                format!(
-                    "The library already has {}. Turn on Overwrite to replace {}.",
-                    join_names(&items),
-                    if items.len() == 1 { "it" } else { "them" }
-                ),
-                None,
-            ),
+            Problem::AlreadyExists {
+                items,
+                ready,
+                notes,
+            } => {
+                let overwrite = if window { "Turn on Overwrite" } else { "Add --overwrite" };
+                match ready {
+                    Some(symbol) => (
+                        "already-in-project",
+                        format!(
+                            "{symbol} is already in the project and ready to place. {overwrite} to replace it."
+                        ),
+                        None,
+                    ),
+                    None => (
+                        "already-exists",
+                        format!(
+                            "The library already has {}. {overwrite} to replace {}.{}",
+                            join_names(&items),
+                            if items.len() == 1 { "it" } else { "them" },
+                            notes.iter().map(|note| format!(" {note}")).collect::<String>()
+                        ),
+                        None,
+                    ),
+                }
+            }
             Problem::NotASymbolLibrary { path } => (
                 "not-a-symbol-library",
                 format!("{path} is not a KiCad symbol library, so nothing was added to it. Choose another library name."),
@@ -176,15 +246,42 @@ impl Problem {
                 format!("{path} already has this symbol, laid out in a way this app cannot safely replace. Open the library in KiCad's Symbol Editor and save it, then convert again."),
                 None,
             ),
+            Problem::NotALibraryTable { path } => (
+                "not-a-library-table",
+                format!("KiCad cannot read the project's library table {path}, so nothing was saved. Repair the file or restore an earlier copy of it, then convert again."),
+                None,
+            ),
+            Problem::ChangedMeanwhile { path } => (
+                "changed-meanwhile",
+                format!("{path} changed while the part was converting, so nothing was saved. Convert again."),
+                None,
+            ),
+            Problem::LibraryNameTaken { kind, name, uri } => {
+                let (what, manager) = match kind {
+                    lib_table::Kind::Symbol => ("symbol", "Manage Symbol Libraries"),
+                    lib_table::Kind::Footprint => ("footprint", "Manage Footprint Libraries"),
+                };
+                (
+                    "library-name-taken",
+                    format!(
+                        "The project already has a {what} library named {name}, at {uri}, so nothing was saved. {}, or remove that library in KiCad's Preferences > {manager}.",
+                        if window { "Choose another library name" } else { "Name another library with --library" }
+                    ),
+                    None,
+                )
+            }
             Problem::UnreadablePart { lcsc_id, item } => {
-                let (what, switch) = match item {
-                    Item::Symbol => ("symbol", "Symbol"),
-                    Item::Footprint => ("footprint", "Footprint"),
-                    Item::Model => ("3D model", "3D model"),
+                let (what, switch, name) = match item {
+                    Item::Symbol => ("symbol", "Symbol", "symbol"),
+                    Item::Footprint => ("footprint", "Footprint", "footprint"),
+                    Item::Model => ("3D model", "3D model", "model"),
                 };
                 (
                     "unreadable-part",
-                    format!("EasyEDA's {what} for {lcsc_id} has a missing or broken coordinate, so nothing was saved. Turn off {switch} to convert the rest."),
+                    format!(
+                        "EasyEDA's {what} for {lcsc_id} has a missing or broken coordinate, so nothing was saved. {}",
+                        leave_out(switch, name, "the rest")
+                    ),
                     None,
                 )
             }
@@ -240,6 +337,49 @@ fn join_names(items: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_command_line_names_its_own_options() {
+        let problem = || Problem::AlreadyExists {
+            items: vec!["the symbol X".into()],
+            ready: None,
+            notes: vec![],
+        };
+        assert_eq!(
+            Problem::AlreadyExists {
+                items: vec!["the symbol X".into()],
+                ready: None,
+                notes: vec!["Set its format.".into()],
+            }
+            .into_message()
+            .text,
+            "The library already has the symbol X. Turn on Overwrite to replace it. Set its format."
+        );
+        assert_eq!(
+            Problem::AlreadyExists {
+                items: vec!["the symbol X".into()],
+                ready: Some("Part_C1:X".into()),
+                notes: vec![],
+            }
+            .into_message()
+            .text,
+            "Part_C1:X is already in the project and ready to place. Turn on Overwrite to replace it."
+        );
+        assert!(problem().into_message().text.contains("Turn on Overwrite"));
+        assert!(
+            problem()
+                .describe(Surface::CommandLine)
+                .text
+                .contains("--overwrite")
+        );
+        let no_footprint = Problem::NoFootprint {
+            lcsc_id: "C1".into(),
+        };
+        assert_eq!(
+            no_footprint.describe(Surface::CommandLine).text,
+            "EasyEDA has no footprint for C1. Leave footprint and model out of --only to convert the symbol."
+        );
+    }
 
     #[test]
     fn lists_read_as_prose() {

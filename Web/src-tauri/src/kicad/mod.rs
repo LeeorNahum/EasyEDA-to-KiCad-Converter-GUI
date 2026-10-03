@@ -1,6 +1,7 @@
 //! Writers for KiCad symbol libraries, footprints, and 3D models.
 
 pub mod footprint;
+pub mod lib_table;
 pub mod model3d;
 pub mod sexpr;
 pub mod symbol;

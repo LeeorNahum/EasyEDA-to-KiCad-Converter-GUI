@@ -35,11 +35,17 @@ export interface Destination {
   modelFolder: string;
   modelReference: string;
   projectRelative: boolean;
+  /** The KiCad project the libraries are added to, when the folder is in one. */
+  projectFile: string | null;
 }
 
 export interface Report {
   destination: Destination;
   written: string[];
+  /** The project's library tables the libraries were added to. */
+  tables: string[];
+  /** `library:symbol`, as the project's schematic finds the symbol. */
+  symbolId: string | null;
   notes: string[];
 }
 

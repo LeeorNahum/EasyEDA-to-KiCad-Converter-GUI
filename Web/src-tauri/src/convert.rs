@@ -5,6 +5,11 @@
 //! overwritten by surprise, downloads the 3D model, and prepares every file
 //! before touching the library. It then writes them all or none: when one
 //! cannot be written, the ones already in place are put back as they were.
+//!
+//! When the output folder is in a KiCad project, the libraries are added to
+//! the project's own library tables in the same all-or-none write, and the
+//! footprint finds its 3D model through `${KIPRJMOD}`, so the part is ready
+//! to place with nothing to set up in KiCad.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,8 +23,10 @@ use std::sync::LazyLock;
 use crate::easyeda::api::{Client, FetchError};
 use crate::easyeda::values::{json_text, or_else};
 use crate::easyeda::{footprint as ee_footprint, model3d as ee_model3d, symbol as ee_symbol};
+use crate::kicad::lib_table::{self, Kind};
 use crate::kicad::{footprint, model3d, sexpr, symbol};
 use crate::messages::{Item, Problem};
+use crate::project::{self, Project};
 
 /// How the library files are laid out under the output folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -43,6 +50,9 @@ pub struct Request {
     pub footprint: bool,
     pub model: bool,
     pub overwrite: bool,
+    /// For an output folder outside a KiCad project: whether the footprint
+    /// finds its 3D model through `${KIPRJMOD}`, taking the output folder as
+    /// the project folder. Inside a project it always does.
     pub project_relative: bool,
 }
 
@@ -59,6 +69,9 @@ pub struct Destination {
     pub model_reference: String,
     /// Whether that reference is relative to the KiCad project.
     pub project_relative: bool,
+    /// The `.kicad_pro` file of the KiCad project the output folder is in,
+    /// whose library tables the libraries are added to.
+    pub project_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -76,8 +89,13 @@ pub struct PartSummary {
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     pub destination: Destination,
-    /// Every file written, in the order written.
+    /// Every file of the part written, in the order written.
     pub written: Vec<String>,
+    /// The project's library tables the libraries were added to.
+    pub tables: Vec<String>,
+    /// The symbol as the project's schematic finds it, `library:symbol`,
+    /// when a symbol was written into a KiCad project.
+    pub symbol_id: Option<String>,
     /// Something the user should know that did not stop the conversion.
     pub notes: Vec<String>,
 }
@@ -134,6 +152,11 @@ pub fn default_output_folder() -> PathBuf {
 
 /// Where a request's files go, or why they cannot go anywhere yet.
 pub fn plan(request: &Request) -> Result<Destination, Problem> {
+    locate(request).map(|(destination, _)| destination)
+}
+
+/// The destination, and the KiCad project it is in.
+fn locate(request: &Request) -> Result<(Destination, Option<Project>), Problem> {
     let library_name = request.library_name.trim();
     if library_name.is_empty() {
         return Err(Problem::LibraryNameMissing);
@@ -168,16 +191,21 @@ pub fn plan(request: &Request) -> Result<Destination, Problem> {
     };
     let model_folder = with_suffix(".3dshapes");
 
-    // A project-relative path only means something inside a chosen folder,
-    // which is treated as the KiCad project folder.
-    let project_relative = request.project_relative && !chosen.is_empty();
-    let model_reference = if project_relative {
-        format!("${{KIPRJMOD}}/{relative_stem}.3dshapes")
-    } else {
-        display(&model_folder).replace('\\', "/")
+    let project = project::find(&base);
+    // Outside a project, a project-relative path only means something
+    // inside a chosen folder, which is then treated as the project folder.
+    let (model_reference, project_relative) = match project
+        .as_ref()
+        .and_then(|project| project.reference(&model_folder))
+    {
+        Some(reference) => (reference, true),
+        None if request.project_relative && !chosen.is_empty() => {
+            (format!("${{KIPRJMOD}}/{relative_stem}.3dshapes"), true)
+        }
+        None => (display(&model_folder).replace('\\', "/"), false),
     };
 
-    Ok(Destination {
+    let destination = Destination {
         library_name,
         folder: display(&folder),
         symbol_library: display(&with_suffix(".kicad_sym")),
@@ -185,7 +213,9 @@ pub fn plan(request: &Request) -> Result<Destination, Problem> {
         model_folder: display(&model_folder),
         model_reference,
         project_relative,
-    })
+        project_file: project.as_ref().map(|project| display(&project.file)),
+    };
+    Ok((destination, project))
 }
 
 fn display(path: &Path) -> String {
@@ -234,6 +264,34 @@ impl ModelSource for Client {
 struct Output {
     path: PathBuf,
     bytes: Vec<u8>,
+    base: Base,
+}
+
+/// What a file held when this conversion read it. `commit` compares each
+/// file with it as it replaces the file, and stops and undoes the whole
+/// write when one differs, so an edit made in the meantime, in KiCad or
+/// anywhere else, is kept. Only an edit landing in the instant between that
+/// comparison and the rename that follows it goes unseen.
+enum Base {
+    /// Written whole, whatever is there: a footprint or a 3D model the
+    /// conversion may overwrite.
+    Any,
+    /// There was no file.
+    Absent,
+    /// The file held these bytes.
+    Bytes(Vec<u8>),
+}
+
+impl Base {
+    fn from_read(bytes: Option<Vec<u8>>) -> Self {
+        bytes.map_or(Base::Absent, Base::Bytes)
+    }
+
+    /// For a file written whole: anything when it may be overwritten, and
+    /// otherwise nothing, as it was when the conversion checked.
+    fn whole(overwrite: bool) -> Self {
+        if overwrite { Base::Any } else { Base::Absent }
+    }
 }
 
 /// Converts one part. `component` is its record from EasyEDA.
@@ -246,23 +304,78 @@ pub async fn convert(
     if !(request.symbol || request.footprint || request.model) {
         return Err(Problem::NothingSelected);
     }
-    let destination = plan(request)?;
+    let (destination, project) = locate(request)?;
     let library = &destination.library_name;
     let mut outputs: Vec<Output> = Vec::new();
     let mut conflicts: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
 
-    if request.symbol {
-        if !component["dataStr"]["shape"].is_array() {
-            return Err(Problem::NoSymbol { lcsc_id });
+    if request.symbol && !component["dataStr"]["shape"].is_array() {
+        return Err(Problem::NoSymbol { lcsc_id });
+    }
+    let ee_footprint = component["packageDetail"]["dataStr"]["shape"]
+        .is_array()
+        .then(|| ee_footprint::import(component));
+    if (request.footprint || request.model) && ee_footprint.is_none() {
+        return Err(Problem::NoFootprint { lcsc_id });
+    }
+
+    // The project's names for the libraries, and its library tables with
+    // them added. A library already in the project, from this app or added
+    // by hand, keeps the name it has there.
+    let mut symbol_nickname = library.clone();
+    let mut footprint_nickname = library.clone();
+    let mut tables: Vec<Output> = Vec::new();
+    let mut relied: Vec<Relied> = Vec::new();
+    // Whether the project already lists every library of the part, turned
+    // on, so a part found in them is ready to place as it is.
+    let mut listed = project.is_some();
+    let mut about_libraries: Vec<String> = Vec::new();
+    if let Some(project) = &project {
+        let symbol_library = Path::new(&destination.symbol_library);
+        if request.symbol || symbol_library.is_file() {
+            let link = link(project, Kind::Symbol, library, symbol_library, &mut notes)?;
+            symbol_nickname = link.nickname;
+            listed &= link.listed;
+            tables.extend(link.table);
+            relied.extend(link.relied);
         }
+        let footprint_library = Path::new(&destination.footprint_library);
+        if request.footprint || footprint_library.is_dir() {
+            let link = link(
+                project,
+                Kind::Footprint,
+                library,
+                footprint_library,
+                &mut notes,
+            )?;
+            footprint_nickname = link.nickname;
+            listed &= link.listed;
+            tables.extend(link.table);
+            relied.extend(link.relied);
+        }
+        // What the project's tables say about these libraries holds for a
+        // part that is already in them too.
+        about_libraries = notes.clone();
+        if !tables.is_empty() && project.is_open() {
+            notes.push(
+                "KiCad has this project open. Close the project and open it again to load the new libraries."
+                    .to_string(),
+            );
+        }
+    }
+
+    let mut symbol_id = None;
+    let mut symbol_present = false;
+    if request.symbol {
         let ee = ee_symbol::import(component);
         let path = PathBuf::from(&destination.symbol_library);
-        let existing = read_library(&path)?;
+        let (existing, read) = read_library(&path)?.unzip();
         if let Some(text) = &existing {
             match symbol::stored(text, &ee.info.name) {
                 symbol::Stored::Absent => {}
                 symbol::Stored::Replaceable => {
+                    symbol_present = true;
                     if !request.overwrite {
                         conflicts.push(format!("the symbol {}", ee.info.name));
                     }
@@ -276,7 +389,9 @@ pub async fn convert(
             }
         }
         let version = symbol::library_version(existing.as_deref());
-        let content = symbol::export(&ee, library, version);
+        let footprint_name = ee_footprint.as_ref().map(footprint::footprint_name);
+        let field = symbol::footprint_field(&ee, &footprint_nickname, footprint_name.as_deref());
+        let content = symbol::export(&ee, &field, version);
         if sexpr::has_unreadable_number(&content) {
             return Err(Problem::UnreadablePart {
                 lcsc_id,
@@ -290,21 +405,23 @@ pub async fn convert(
         outputs.push(Output {
             path,
             bytes: text.into_bytes(),
+            base: Base::from_read(read),
         });
+        if project.is_some() {
+            symbol_id = Some(format!(
+                "{symbol_nickname}:{}",
+                symbol::library_id(&ee.info.name)
+            ));
+        }
     }
 
-    let has_footprint = component["packageDetail"]["dataStr"]["shape"].is_array();
-    if request.footprint {
-        if !has_footprint {
-            return Err(Problem::NoFootprint { lcsc_id });
-        }
-        let ee = ee_footprint::import(component);
-        let path = Path::new(&destination.footprint_library)
-            .join(format!("{}.kicad_mod", footprint::footprint_name(&ee)));
+    if let (true, Some(ee)) = (request.footprint, &ee_footprint) {
+        let name = footprint::footprint_name(ee);
+        let path = Path::new(&destination.footprint_library).join(format!("{name}.kicad_mod"));
         if !request.overwrite && path.is_file() {
-            conflicts.push(format!("the footprint {}", footprint::footprint_name(&ee)));
+            conflicts.push(format!("the footprint {name}"));
         }
-        let text = footprint::export(&ee, &destination.model_reference);
+        let text = footprint::export(ee, &destination.model_reference);
         if sexpr::has_unreadable_number(&text) {
             return Err(Problem::UnreadablePart {
                 lcsc_id,
@@ -314,13 +431,11 @@ pub async fn convert(
         outputs.push(Output {
             path,
             bytes: text.into_bytes(),
+            base: Base::whole(request.overwrite),
         });
     }
 
     if request.model {
-        if !has_footprint {
-            return Err(Problem::NoFootprint { lcsc_id });
-        }
         match ee_model3d::from_component(component) {
             None => notes.push("EasyEDA has no 3D model for this part.".to_string()),
             Some(model) => {
@@ -364,12 +479,14 @@ pub async fn convert(
                                 outputs.push(Output {
                                     path: wrl_path,
                                     bytes: wrl.into_bytes(),
+                                    base: Base::whole(request.overwrite),
                                 });
                             }
                             if let Some(step) = step {
                                 outputs.push(Output {
                                     path: step_path,
                                     bytes: step,
+                                    base: Base::whole(request.overwrite),
                                 });
                             }
                         }
@@ -380,10 +497,17 @@ pub async fn convert(
     }
 
     if !conflicts.is_empty() {
-        return Err(Problem::AlreadyExists { items: conflicts });
+        return Err(Problem::AlreadyExists {
+            items: conflicts,
+            ready: symbol_id.filter(|_| listed && symbol_present),
+            notes: about_libraries,
+        });
     }
 
-    let (written, leftovers) = commit(&outputs)?;
+    let part_files = outputs.len();
+    outputs.extend(tables);
+    let (mut written, leftovers) = commit(&outputs, &relied)?;
+    let tables = written.split_off(part_files);
     for leftover in leftovers {
         notes.push(format!(
             "The earlier version of a replaced file stayed beside it as {leftover}. Delete it when it is no longer needed."
@@ -392,15 +516,167 @@ pub async fn convert(
     Ok(Report {
         destination,
         written,
+        tables,
+        symbol_id,
         notes,
     })
 }
 
-/// An existing symbol library, with Windows line endings read as `\n`, or
-/// `None` when there is no library yet.
+/// A library's place in a project's library table.
+struct Link {
+    /// The name the project knows the library by.
+    nickname: String,
+    /// The table with the library added, when it was not in it yet.
+    table: Option<Output>,
+    /// The table as read, when the library was in it already and the
+    /// conversion uses the name found there.
+    relied: Option<Relied>,
+    /// Whether the table already lists the library, turned on and shown.
+    listed: bool,
+}
+
+/// A file the conversion read and relies on without changing it. `commit`
+/// writes nothing when it no longer holds these bytes.
+struct Relied {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+/// Finds `library` in the project's table of this kind, or adds it as
+/// `nickname` with a path through `${KIPRJMOD}`. A table KiCad could not
+/// read, or another library under the same name, is refused rather than
+/// changed.
+fn link(
+    project: &Project,
+    kind: Kind,
+    nickname: &str,
+    library: &Path,
+    notes: &mut Vec<String>,
+) -> Result<Link, Problem> {
+    let not_linked = Link {
+        nickname: nickname.to_string(),
+        table: None,
+        relied: None,
+        listed: false,
+    };
+    let Some(uri) = project.reference(library) else {
+        return Ok(not_linked);
+    };
+    let path = project.folder.join(kind.file_name());
+    let new_table = |base: Base| Link {
+        table: Some(Output {
+            bytes: lib_table::new_table(kind, nickname, &uri).into_bytes(),
+            path: path.clone(),
+            base,
+        }),
+        nickname: nickname.to_string(),
+        relied: None,
+        listed: false,
+    };
+    if !path.exists() {
+        return Ok(new_table(Base::Absent));
+    }
+    if !path.is_file() {
+        return Err(Problem::DestinationIsFolder {
+            path: display(&path),
+        });
+    }
+    let bytes = fs::read(&path).map_err(|error| Problem::ReadFailed {
+        path: display(&path),
+        detail: error.to_string(),
+    })?;
+    // KiCad reads a file of at most one byte, room for a byte order mark,
+    // as an empty table.
+    if bytes.len() <= 1 {
+        return Ok(new_table(Base::Bytes(bytes)));
+    }
+    let unreadable = || Problem::NotALibraryTable {
+        path: display(&path),
+    };
+    let text = String::from_utf8(bytes).map_err(|_| unreadable())?;
+    let table = lib_table::read(&text, kind).ok_or_else(unreadable)?;
+
+    let listed = table.rows.iter().find_map(|row| {
+        let name = row.name.as_ref()?;
+        let place = project.resolve(row.uri.as_ref()?)?;
+        project::same_place(&place, library).then_some((name, row))
+    });
+    let (what, manager) = match kind {
+        Kind::Symbol => ("symbol", "Manage Symbol Libraries"),
+        Kind::Footprint => ("footprint", "Manage Footprint Libraries"),
+    };
+    if let Some((name, row)) = listed {
+        // KiCad reads each library with the reader its row names.
+        let format = row.format.as_deref().unwrap_or_default();
+        let readable = format.eq_ignore_ascii_case("KiCad");
+        if !readable {
+            notes.push(format!(
+                "The project lists its {what} library {name} as the format \"{format}\", so KiCad cannot read it. Set its format to KiCad in Preferences > {manager}."
+            ));
+        } else if row.disabled {
+            notes.push(format!(
+                "The project's {what} library {name} is turned off, so KiCad does not load it. Turn it on in Preferences > {manager}."
+            ));
+        } else if row.hidden {
+            notes.push(format!(
+                "The project's {what} library {name} is hidden, so KiCad does not list it. Show it in Preferences > {manager}."
+            ));
+        }
+        return Ok(Link {
+            nickname: name.clone(),
+            table: None,
+            relied: Some(Relied {
+                bytes: text.into_bytes(),
+                path,
+            }),
+            listed: readable && !row.disabled && !row.hidden,
+        });
+    }
+    // A row through a path variable that is not set here cannot be placed.
+    // When it names a file like this library's, it may be this library
+    // under another name, which only the person with that setting can tell.
+    let file = library.file_name().map(|name| name.to_string_lossy());
+    for row in &table.rows {
+        if let (Some(name), Some(uri), Some(file)) = (&row.name, &row.uri, &file)
+            && name != nickname
+            && project.resolve(uri).is_none()
+            && uri
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .is_some_and(|last| last.eq_ignore_ascii_case(file))
+        {
+            notes.push(format!(
+                "The project also lists {name} at {uri}, a path this app cannot follow. If that is this same library, it now has two names in {manager}, and both work."
+            ));
+        }
+    }
+    if let Some(row) = table
+        .rows
+        .iter()
+        .find(|row| row.name.as_deref() == Some(nickname))
+    {
+        return Err(Problem::LibraryNameTaken {
+            kind,
+            name: nickname.to_string(),
+            uri: row.uri.clone().unwrap_or_default(),
+        });
+    }
+    Ok(Link {
+        table: Some(Output {
+            bytes: lib_table::with_row(&text, &table, nickname, &uri).into_bytes(),
+            base: Base::Bytes(text.into_bytes()),
+            path,
+        }),
+        ..not_linked
+    })
+}
+
+/// An existing symbol library, with Windows line endings read as `\n`,
+/// and the bytes it was read from, or `None` when there is no library yet.
 /// A file that is not one well-formed KiCad symbol library is refused
 /// rather than added to.
-fn read_library(path: &Path) -> Result<Option<String>, Problem> {
+fn read_library(path: &Path) -> Result<Option<(String, Vec<u8>)>, Problem> {
     if !path.exists() {
         return Ok(None);
     }
@@ -416,12 +692,12 @@ fn read_library(path: &Path) -> Result<Option<String>, Problem> {
     let text = String::from_utf8_lossy(&bytes)
         .replace("\r\n", "\n")
         .replace('\r', "\n");
-    if sexpr::library_symbols(&text).is_none() {
+    if sexpr::library_symbols(&text).is_none() || !sexpr::has_readable_version(&text) {
         return Err(Problem::NotASymbolLibrary {
             path: display(path),
         });
     }
-    Ok(Some(text))
+    Ok(Some((text, bytes)))
 }
 
 /// Distinguishes this conversion's temporary files from any other's.
@@ -444,9 +720,12 @@ fn file_name(path: &Path) -> String {
 /// failure puts every destination back as it was. When putting one back
 /// fails too, the problem names it and the copy that holds its old content.
 ///
+/// Nothing is replaced when a file in `relied` no longer holds what the
+/// conversion read from it.
+///
 /// Returns the files written, and the names of any earlier versions that
 /// could not be removed once the new files were in place.
-fn commit(outputs: &[Output]) -> Result<(Vec<String>, Vec<String>), Problem> {
+fn commit(outputs: &[Output], relied: &[Relied]) -> Result<(Vec<String>, Vec<String>), Problem> {
     for output in outputs {
         if output.path.exists() && !output.path.is_file() {
             return Err(Problem::DestinationIsFolder {
@@ -477,6 +756,15 @@ fn commit(outputs: &[Output]) -> Result<(Vec<String>, Vec<String>), Problem> {
             return Err(write_failed(&output.path, &error));
         }
         staged.push(temporary);
+    }
+
+    for file in relied {
+        if fs::read(&file.path).ok().as_ref() != Some(&file.bytes) {
+            discard(&staged);
+            return Err(Problem::ChangedMeanwhile {
+                path: display(&file.path),
+            });
+        }
     }
 
     // Each destination already replaced, with the file it replaced.
@@ -514,17 +802,59 @@ fn commit(outputs: &[Output]) -> Result<(Vec<String>, Vec<String>), Problem> {
             }
         }
     };
+    // Stops the write because a file no longer holds what the conversion
+    // read, once `unrestored` names the files that could not be put back.
+    let changed = |destination: &Path, unrestored: Vec<String>| {
+        if unrestored.is_empty() {
+            Problem::ChangedMeanwhile {
+                path: display(destination),
+            }
+        } else {
+            Problem::WriteIncomplete {
+                path: display(destination),
+                detail: "It changed while the part was converting.".to_string(),
+                unrestored,
+            }
+        }
+    };
     for (index, output) in outputs.iter().enumerate() {
         let destination = output.path.as_path();
         let previous = if destination.exists() {
+            if matches!(output.base, Base::Absent) {
+                let unrestored = undo(&placed);
+                discard(&staged[index..]);
+                return Err(changed(destination, unrestored));
+            }
             let aside = beside(destination, &format!("{tag}.old"));
             if let Err(error) = fs::rename(destination, &aside) {
                 let unrestored = undo(&placed);
                 discard(&staged[index..]);
                 return Err(fail(destination, &error, unrestored));
             }
+            // Compared once it is moved aside, so the bytes compared are
+            // the bytes replaced.
+            if let Base::Bytes(bytes) = &output.base
+                && fs::read(&aside).ok().as_ref() != Some(bytes)
+            {
+                let mut unrestored = Vec::new();
+                if fs::rename(&aside, destination).is_err() {
+                    unrestored.push(format!(
+                        "{}, whose current version is {}",
+                        display(destination),
+                        file_name(&aside)
+                    ));
+                }
+                unrestored.extend(undo(&placed));
+                discard(&staged[index..]);
+                return Err(changed(destination, unrestored));
+            }
             Some(aside)
         } else {
+            if matches!(output.base, Base::Bytes(_)) {
+                let unrestored = undo(&placed);
+                discard(&staged[index..]);
+                return Err(changed(destination, unrestored));
+            }
             None
         };
         if let Err(error) = fs::rename(&staged[index], destination) {
@@ -628,6 +958,273 @@ mod tests {
         folder
     }
 
+    /// A part with a one-pin symbol whose package is `SYMBOL_PACKAGE`, and an
+    /// empty footprint named `PKG`.
+    fn part_with_footprint() -> Value {
+        serde_json::json!({
+            "dataStr": {
+                "head": { "x": 0, "y": 0, "c_para": { "name": "X", "pre": "U?", "package": "SYMBOL_PACKAGE" } },
+                "BBox": { "x": 0, "y": 0, "width": 10, "height": 10 },
+                "shape": ["P~show~0~1~0~0~0~id~0^^0~0^^M 0 0 h 10~#000^^1~0~0~0~A~start~~~#000^^1~0~0~0~1~end~~~#000^^0~0~0^^0~"]
+            },
+            "packageDetail": {
+                "dataStr": { "head": { "x": 0, "y": 0, "c_para": { "package": "PKG" } }, "shape": [] }
+            }
+        })
+    }
+
+    /// Converts the symbol and footprint of `part_with_footprint` as a
+    /// Single Part Folder named `Part_C1` in `folder`.
+    fn convert_part(folder: &Path, overwrite: bool) -> Result<Report, Problem> {
+        let request = Request {
+            lcsc_id: "C1".into(),
+            output_folder: folder.to_string_lossy().into_owned(),
+            mode: LibraryMode::SinglePart,
+            library_name: "Part_C1".into(),
+            symbol: true,
+            footprint: true,
+            model: false,
+            overwrite,
+            project_relative: false,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(convert(&request, &part_with_footprint(), &NoModels))
+    }
+
+    /// A KiCad project folder with an empty `lib` folder in it.
+    fn project(name: &str) -> (PathBuf, PathBuf) {
+        let folder = scratch(name);
+        fs::write(folder.join("Board.kicad_pro"), "{}").unwrap();
+        let lib = folder.join("lib");
+        fs::create_dir(&lib).unwrap();
+        (folder, lib)
+    }
+
+    fn read_text(path: &Path) -> String {
+        fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn a_part_converted_into_a_project_is_linked() {
+        let (folder, lib) = project("linked");
+        let report = convert_part(&lib, false).unwrap();
+        let symbols = folder.join("sym-lib-table");
+        let footprints = folder.join("fp-lib-table");
+        assert_eq!(
+            read_text(&symbols),
+            lib_table::new_table(
+                Kind::Symbol,
+                "Part_C1",
+                "${KIPRJMOD}/lib/Part_C1/Part_C1.kicad_sym"
+            )
+        );
+        assert_eq!(
+            read_text(&footprints),
+            lib_table::new_table(
+                Kind::Footprint,
+                "Part_C1",
+                "${KIPRJMOD}/lib/Part_C1/Part_C1.pretty"
+            )
+        );
+        assert_eq!(report.symbol_id.as_deref(), Some("Part_C1:X"));
+        assert_eq!(
+            report.destination.model_reference,
+            "${KIPRJMOD}/lib/Part_C1/Part_C1.3dshapes"
+        );
+        assert_eq!(
+            report.destination.project_file,
+            Some(display(&folder.join("Board.kicad_pro")))
+        );
+        // The symbol names the footprint as saved, not its own package.
+        let library = read_text(&lib.join("Part_C1").join("Part_C1.kicad_sym"));
+        assert!(library.contains("\"Part_C1:PKG\""), "{library}");
+        assert!(
+            lib.join("Part_C1")
+                .join("Part_C1.pretty")
+                .join("PKG.kicad_mod")
+                .is_file()
+        );
+
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+
+        // A part the project lists is ready to place as it is.
+        assert_eq!(
+            convert_part(&lib, false),
+            Err(Problem::AlreadyExists {
+                items: vec!["the symbol X".into(), "the footprint PKG".into()],
+                ready: Some("Part_C1:X".into()),
+                notes: vec![],
+            })
+        );
+
+        // Converting again adds no second row, and so has nothing for an
+        // open KiCad to load.
+        fs::write(folder.join("~Board.kicad_pro.lck"), "").unwrap();
+        let before = (read_text(&symbols), read_text(&footprints));
+        let again = convert_part(&lib, true).unwrap();
+        assert!(again.notes.is_empty(), "{:?}", again.notes);
+        assert_eq!((read_text(&symbols), read_text(&footprints)), before);
+        assert_eq!(report.written.len(), 2);
+        assert_eq!(report.tables, [display(&symbols), display(&footprints)]);
+        assert!(again.tables.is_empty());
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_folder_outside_a_project_gets_no_library_tables() {
+        let folder = scratch("unlinked");
+        let report = convert_part(&folder, false).unwrap();
+        assert!(matches!(
+            convert_part(&folder, false),
+            Err(Problem::AlreadyExists { ready: None, .. })
+        ));
+        assert_eq!(report.symbol_id, None);
+        assert_eq!(report.destination.project_file, None);
+        assert!(!folder.join("sym-lib-table").exists());
+        assert!(!folder.join("fp-lib-table").exists());
+        let library = read_text(&folder.join("Part_C1").join("Part_C1.kicad_sym"));
+        assert!(library.contains("\"Part_C1:PKG\""));
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_project_table_gains_one_line_and_keeps_the_rest() {
+        let (folder, lib) = project("added");
+        let table = folder.join("sym-lib-table");
+        let existing = "(sym_lib_table\r\n\t(version 7)\r\n\t(lib (name \"Other\") (type \"KiCad\") (uri \"${KIPRJMOD}/Other.kicad_sym\") (options \"\") (descr \"Mine\"))\r\n)\r\n";
+        fs::write(&table, existing).unwrap();
+        fs::write(folder.join("~Board.kicad_pro.lck"), "").unwrap();
+        let report = convert_part(&lib, false).unwrap();
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.starts_with("KiCad has this project open.")),
+            "{:?}",
+            report.notes
+        );
+        let text = read_text(&table);
+        assert_eq!(
+            text,
+            existing.replace(
+                "\r\n)\r\n",
+                "\r\n\t(lib (name \"Part_C1\") (type \"KiCad\") (uri \"${KIPRJMOD}/lib/Part_C1/Part_C1.kicad_sym\") (options \"\") (descr \"\"))\r\n)\r\n"
+            )
+        );
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_library_the_project_already_has_keeps_its_name() {
+        let (folder, lib) = project("known");
+        let table = folder.join("fp-lib-table");
+        let existing = "(fp_lib_table\n\t(version 7)\n\t(lib (name \"Mine\") (type \"KiCad\") (uri \"${KIPRJMOD}/lib/Part_C1/Part_C1.pretty/\") (options \"\") (descr \"\") (disabled))\n)\n";
+        fs::write(&table, existing).unwrap();
+        let report = convert_part(&lib, false).unwrap();
+        assert_eq!(read_text(&table), existing);
+        let library = read_text(&lib.join("Part_C1").join("Part_C1.kicad_sym"));
+        assert!(library.contains("\"Mine:PKG\""), "{library}");
+        // A library that is turned off is not ready to place from.
+        assert!(matches!(
+            convert_part(&lib, false),
+            Err(Problem::AlreadyExists { ready: None, .. })
+        ));
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("Mine is turned off")),
+            "{:?}",
+            report.notes
+        );
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_library_listed_in_another_format_is_not_ready() {
+        let (folder, lib) = project("format");
+        let table = folder.join("sym-lib-table");
+        fs::write(
+            &table,
+            "(sym_lib_table\n\t(lib (name \"Part_C1\") (type \"Legacy\") (uri \"${KIPRJMOD}/lib/Part_C1/Part_C1.kicad_sym\"))\n)\n",
+        )
+        .unwrap();
+        let report = convert_part(&lib, false).unwrap();
+        assert!(
+            report.notes.iter().any(|note| note.contains("\"Legacy\"")),
+            "{:?}",
+            report.notes
+        );
+        let Err(Problem::AlreadyExists { ready, notes, .. }) = convert_part(&lib, false) else {
+            panic!("the part is there already");
+        };
+        assert_eq!(ready, None);
+        assert!(
+            notes.iter().any(|note| note.contains("\"Legacy\"")),
+            "{notes:?}"
+        );
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_row_that_cannot_be_placed_is_pointed_out() {
+        let (folder, lib) = project("unplaced");
+        let table = folder.join("sym-lib-table");
+        let existing = "(sym_lib_table\n\t(lib (name \"Alias\") (type \"KiCad\") (uri \"${EASYEDA_TEST_UNSET}/Part_C1.kicad_sym\"))\n\t(lib (name \"Other\") (type \"KiCad\") (uri \"${EASYEDA_TEST_UNSET}/Other.kicad_sym\"))\n)\n";
+        fs::write(&table, existing).unwrap();
+        let report = convert_part(&lib, false).unwrap();
+        let about: Vec<_> = report
+            .notes
+            .iter()
+            .filter(|note| note.contains("cannot follow"))
+            .collect();
+        assert_eq!(about.len(), 1, "{:?}", report.notes);
+        assert!(about[0].contains("Alias") && about[0].contains("both work"));
+        assert_eq!(
+            lib_table::read(&read_text(&table), Kind::Symbol)
+                .unwrap()
+                .rows
+                .len(),
+            3
+        );
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_taken_name_or_an_unreadable_table_changes_nothing() {
+        let (folder, lib) = project("refused");
+        let table = folder.join("sym-lib-table");
+        let taken = "(sym_lib_table (lib (name Part_C1) (uri C:/Elsewhere/Part_C1.kicad_sym)))";
+        fs::write(&table, taken).unwrap();
+        assert!(matches!(
+            convert_part(&lib, false),
+            Err(Problem::LibraryNameTaken {
+                kind: Kind::Symbol,
+                ..
+            })
+        ));
+        for broken in [
+            "(sym_lib_table",
+            "(fp_lib_table)",
+            "\u{feff}(sym_lib_table)",
+        ] {
+            fs::write(&table, broken).unwrap();
+            assert!(
+                matches!(
+                    convert_part(&lib, false),
+                    Err(Problem::NotALibraryTable { .. })
+                ),
+                "{broken:?}"
+            );
+            assert_eq!(read_text(&table), broken);
+        }
+        assert_eq!(fs::read_dir(&lib).unwrap().count(), 0, "nothing was saved");
+        assert!(!folder.join("fp-lib-table").exists());
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
     #[test]
     fn libraries_that_cannot_be_edited_safely_are_refused() {
         let folder = scratch("layouts");
@@ -641,11 +1238,16 @@ mod tests {
             convert_symbol(&folder, "0"),
             Err(Problem::LibraryLayout { .. })
         ));
-        fs::write(&library, "(kicad_symbol_lib (version 20211014)").unwrap();
-        assert!(matches!(
-            convert_symbol(&folder, "0"),
-            Err(Problem::NotASymbolLibrary { .. })
-        ));
+        for unreadable in [
+            "(kicad_symbol_lib (version 20211014)",
+            "(kicad_symbol_lib (version banana) (symbol \"X\" (in_bom yes)))",
+        ] {
+            fs::write(&library, unreadable).unwrap();
+            assert!(matches!(
+                convert_symbol(&folder, "0"),
+                Err(Problem::NotASymbolLibrary { .. })
+            ));
+        }
         fs::remove_file(&library).unwrap();
         fs::create_dir(&library).unwrap();
         assert!(matches!(
@@ -688,13 +1290,18 @@ mod tests {
             Output {
                 path: library.clone(),
                 bytes: b"new".to_vec(),
+                base: Base::Bytes(b"old".to_vec()),
             },
             Output {
                 path: folder.join("lib.pretty").join("part.kicad_mod"),
                 bytes: b"x".to_vec(),
+                base: Base::Any,
             },
         ];
-        assert!(matches!(commit(&outputs), Err(Problem::WriteFailed { .. })));
+        assert!(matches!(
+            commit(&outputs, &[]),
+            Err(Problem::WriteFailed { .. })
+        ));
         assert_eq!(fs::read_to_string(&library).unwrap(), "old");
         let mut names: Vec<_> = fs::read_dir(&folder)
             .unwrap()
@@ -702,6 +1309,105 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["lib.kicad_sym", "lib.pretty"]);
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_file_changed_since_it_was_read_is_not_replaced() {
+        let folder = scratch("changed");
+        let table = folder.join("sym-lib-table");
+        fs::write(&table, "edited meanwhile").unwrap();
+        let outputs = |base| {
+            [Output {
+                path: table.clone(),
+                bytes: b"new".to_vec(),
+                base,
+            }]
+        };
+        assert!(matches!(
+            commit(&outputs(Base::Bytes(b"as read".to_vec())), &[]),
+            Err(Problem::ChangedMeanwhile { .. })
+        ));
+        assert!(matches!(
+            commit(&outputs(Base::Absent), &[]),
+            Err(Problem::ChangedMeanwhile { .. })
+        ));
+        assert_eq!(read_text(&table), "edited meanwhile");
+        // A change that lands after the first file is in place undoes it.
+        let library = folder.join("lib.kicad_sym");
+        fs::write(&library, "library").unwrap();
+        let both = [
+            Output {
+                path: library.clone(),
+                bytes: b"new library".to_vec(),
+                base: Base::Bytes(b"library".to_vec()),
+            },
+            Output {
+                path: table.clone(),
+                bytes: b"new".to_vec(),
+                base: Base::Bytes(b"as read".to_vec()),
+            },
+        ];
+        assert!(matches!(
+            commit(&both, &[]),
+            Err(Problem::ChangedMeanwhile { .. })
+        ));
+        assert_eq!(read_text(&library), "library");
+        assert_eq!(read_text(&table), "edited meanwhile");
+        let mut names: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["lib.kicad_sym", "sym-lib-table"],
+            "no files left behind"
+        );
+        fs::remove_file(&library).unwrap();
+        let missing = folder.join("missing");
+        assert!(matches!(
+            commit(
+                &[Output {
+                    path: missing.clone(),
+                    bytes: b"new".to_vec(),
+                    base: Base::Bytes(b"was here".to_vec()),
+                }],
+                &[]
+            ),
+            Err(Problem::ChangedMeanwhile { .. })
+        ));
+        assert!(!missing.exists());
+        // A file only read, such as a table whose row is reused, stops the
+        // write too when it changed.
+        let relied = |bytes: &[u8]| {
+            [Relied {
+                path: folder.join("fp-lib-table"),
+                bytes: bytes.to_vec(),
+            }]
+        };
+        fs::write(folder.join("fp-lib-table"), "row removed").unwrap();
+        let current = || outputs(Base::Bytes(b"edited meanwhile".to_vec()));
+        assert!(matches!(
+            commit(&current(), &relied(b"as read")),
+            Err(Problem::ChangedMeanwhile { .. })
+        ));
+        assert_eq!(read_text(&table), "edited meanwhile");
+        assert!(commit(&current(), &relied(b"row removed")).is_ok());
+        assert_eq!(read_text(&table), "new");
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn an_empty_table_is_read_as_empty() {
+        let (folder, lib) = project("empty");
+        for empty in ["", "\n"] {
+            fs::write(folder.join("sym-lib-table"), empty).unwrap();
+            fs::write(folder.join("fp-lib-table"), empty).unwrap();
+            convert_part(&lib, true).unwrap();
+            let table = read_text(&folder.join("sym-lib-table"));
+            assert_eq!(lib_table::read(&table, Kind::Symbol).unwrap().rows.len(), 1);
+        }
         fs::remove_dir_all(&folder).unwrap();
     }
 

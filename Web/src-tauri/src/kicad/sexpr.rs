@@ -65,6 +65,35 @@ pub struct LibrarySymbol {
     pub span: Range<usize>,
 }
 
+/// Whether a library's own `(version ...)`, the one directly inside its
+/// top-level list, is a whole number as KiCad reads it, or is left out.
+/// KiCad opens no library whose version is anything else.
+pub fn has_readable_version(text: &str) -> bool {
+    let Some(tokens) = tokens(text) else {
+        return false;
+    };
+    let mut depth = 0;
+    for (index, (token, _)) in tokens.iter().enumerate() {
+        match token {
+            Token::Open => {
+                depth += 1;
+                let word = |offset: usize| match tokens.get(index + offset) {
+                    Some((Token::Word(word), _)) => Some(*word),
+                    _ => None,
+                };
+                if depth == 2 && word(1) == Some("version") {
+                    return word(2).is_some_and(|number| {
+                        number.bytes().all(|c| c.is_ascii_digit()) && number.parse::<i32>().is_ok()
+                    }) && matches!(tokens.get(index + 3), Some((Token::Close, _)));
+                }
+            }
+            Token::Close => depth -= 1,
+            Token::Text(_) | Token::Word(_) => {}
+        }
+    }
+    true
+}
+
 /// The symbols directly inside a symbol library, or `None` when the text is
 /// not one well-formed `(kicad_symbol_lib ...)` list.
 pub fn library_symbols(text: &str) -> Option<Vec<LibrarySymbol>> {
@@ -173,6 +202,22 @@ mod tests {
 
     #[test]
     fn finds_numbers_kicad_cannot_read() {
+        assert!(has_readable_version(
+            "(kicad_symbol_lib (version 20231120))"
+        ));
+        assert!(has_readable_version("(kicad_symbol_lib (generator x))"));
+        let filler = " ".repeat(600);
+        for unreadable in [
+            "(kicad_symbol_lib (version banana))".to_string(),
+            "(kicad_symbol_lib (version banana) (generator \"(version 20211014)\"))".to_string(),
+            format!("(kicad_symbol_lib{filler}(version banana))"),
+            "(kicad_symbol_lib (version 20211014202110142021101420))".to_string(),
+            "(kicad_symbol_lib (version -1))".to_string(),
+            "(kicad_symbol_lib (version 1 2))".to_string(),
+            "(kicad_symbol_lib (version \"20211014\"))".to_string(),
+        ] {
+            assert!(!has_readable_version(&unreadable), "{unreadable}");
+        }
         assert!(has_unreadable_number("(pad 1 smd rect (at NaN 0.00 0.00))"));
         assert!(has_unreadable_number("(xy -inf 1)"));
         assert!(has_unreadable_number("(xy 1e309 1)"));

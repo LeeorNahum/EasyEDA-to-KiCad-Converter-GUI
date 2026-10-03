@@ -82,7 +82,8 @@ body {
 
 /*
  * The window is one viewport tall: the form scrolls, and the bar with
- * Convert and its result stays at the bottom where it is always visible.
+ * Convert stays at the bottom where it is always visible. The result sits
+ * above Convert in the bar, so the bar grows upward and Convert stays put.
  */
 .window {
   height: 100%;
@@ -375,6 +376,13 @@ fieldset.content {
 .outcome.problem {
   padding: var(--space-2) var(--space-3);
   background: var(--color-problem-surface);
+  border-radius: var(--radius);
+  font-size: var(--text-body);
+}
+
+.outcome.notice {
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-ground);
   border-radius: var(--radius);
   font-size: var(--text-body);
 }

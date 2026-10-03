@@ -17,9 +17,13 @@ import {
 } from "./bridge.ts";
 import { edit, emptyLibraryName, suggest, type LibraryName } from "./library-name.ts";
 import { compactPath } from "./path-text.ts";
+import { readSettings, type Settings } from "./settings.ts";
 
 /** How long typing must pause before the part is looked up. */
 const LOOKUP_DELAY_MS = 500;
+
+/** Where the window keeps its choices between launches. */
+const SETTINGS_KEY = "settings";
 
 type Lookup =
   | { state: "empty" }
@@ -41,17 +45,18 @@ function normalizePart(text: string): string | null {
 }
 
 export function App() {
+  const [saved] = useState(() => readSettings(localStorage.getItem(SETTINGS_KEY)));
   const [defaultFolder, setDefaultFolder] = useState("");
   const [partText, setPartText] = useState("");
   const [lookup, setLookup] = useState<Lookup>({ state: "empty" });
-  const [outputFolder, setOutputFolder] = useState("");
-  const [mode, setMode] = useState<LibraryMode>("singlePart");
+  const [outputFolder, setOutputFolder] = useState(saved.outputFolder);
+  const [mode, setMode] = useState<LibraryMode>(saved.mode);
   const [name, setName] = useState<LibraryName>(emptyLibraryName);
-  const [symbol, setSymbol] = useState(true);
-  const [footprint, setFootprint] = useState(true);
-  const [model, setModel] = useState(true);
+  const [symbol, setSymbol] = useState(saved.symbol);
+  const [footprint, setFootprint] = useState(saved.footprint);
+  const [model, setModel] = useState(saved.model);
   const [overwrite, setOverwrite] = useState(false);
-  const [projectRelative, setProjectRelative] = useState(true);
+  const [projectRelative, setProjectRelative] = useState(saved.projectRelative);
   const [destination, setDestination] = useState<Destination | null>(null);
   const [planProblem, setPlanProblem] = useState<Problem | null>(null);
   const [conversion, setConversion] = useState<Conversion>({ state: "idle" });
@@ -74,6 +79,11 @@ export function App() {
   useEffect(() => {
     void defaultOutputFolder().then(setDefaultFolder);
   }, []);
+
+  useEffect(() => {
+    const settings: Settings = { outputFolder, mode, symbol, footprint, model, projectRelative };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }, [outputFolder, mode, symbol, footprint, model, projectRelative]);
 
   // Look the part up once typing pauses. A newer lookup makes an older
   // answer irrelevant, so only the latest one lands.
@@ -303,7 +313,22 @@ export function App() {
               <div className="destination">
                 <span className="label">Files go in</span>
                 <PathText path={destination.folder} />
-                {footprint && (
+                {destination.projectFile ? (
+                  <>
+                    <span className="label">Links to the KiCad project</span>
+                    <PathText path={destination.projectFile} />
+                  </>
+                ) : (
+                  <>
+                    <span className="label">Not in a KiCad project</span>
+                    <span className="hint">
+                      Choose a folder in a project to have the part added to it. Here, you add the
+                      libraries in KiCad yourself.
+                    </span>
+                  </>
+                )}
+                {/* In a project the path is worked out for it, so it is not shown. */}
+                {footprint && !destination.projectFile && (
                   <>
                     <span className="label">The footprint looks for its 3D model in</span>
                     <PathText path={destination.modelReference} />
@@ -329,23 +354,29 @@ export function App() {
                 checked={overwrite}
                 onChange={setOverwrite}
               />
-              <Check
-                label="Project relative"
-                hint={
-                  outputFolder.trim() === ""
-                    ? "Applies once you choose an output folder, which is then taken as the KiCad project folder."
-                    : "The footprint finds its 3D model through ${KIPRJMOD}, taking the output folder as the KiCad project folder."
-                }
-                checked={projectRelative}
-                onChange={setProjectRelative}
-              />
+              {/* In a KiCad project, paths are always relative to it. */}
+              {!destination?.projectFile && (
+                <Check
+                  label="Project relative"
+                  hint={
+                    outputFolder.trim() === ""
+                      ? "Applies once you choose an output folder, which is then taken as the KiCad project folder."
+                      : "The footprint finds its 3D model through ${KIPRJMOD}, taking the output folder as the KiCad project folder."
+                  }
+                  checked={projectRelative}
+                  onChange={setProjectRelative}
+                />
+              )}
             </div>
           </section>
         </fieldset>
       </div>
 
       <div className="bar">
+        {/* The result sits above Convert and grows upward, so Convert never
+            moves under the pointer. */}
         <div className="bar-content">
+          <Outcome conversion={conversion} blocker={blocker} />
           <button
             type="submit"
             className="button primary convert"
@@ -355,7 +386,6 @@ export function App() {
             {converting && <span className="spinner" aria-hidden="true" />}
             {converting ? "Converting" : "Convert"}
           </button>
-          <Outcome conversion={conversion} blocker={blocker} />
         </div>
       </div>
     </form>
@@ -430,6 +460,15 @@ function Outcome({ conversion, blocker }: { conversion: Conversion; blocker: str
     case "converting":
       return <p className="outcome quiet">Fetching the part and writing its files.</p>;
     case "failed":
+      // A part that is already in the project needs nothing done, so it is
+      // not shown as a failure.
+      if (conversion.problem.code === "already-in-project") {
+        return (
+          <p className="outcome notice" role="status">
+            {conversion.problem.text}
+          </p>
+        );
+      }
       return (
         <div className="outcome problem" role="alert">
           <span>{conversion.problem.text}</span>
@@ -462,6 +501,9 @@ function Done({ report }: { report: Report }) {
           Open folder
         </button>
       </div>
+      {report.symbolId && (
+        <span className="note">Add it in the schematic as {report.symbolId}.</span>
+      )}
       {report.notes.map((note) => (
         <span key={note} className="note">
           {note}

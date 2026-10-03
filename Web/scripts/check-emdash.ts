@@ -1,6 +1,6 @@
 /**
- * Fails when any text file in the repository contains an em dash, written as
- * the character or as an HTML entity.
+ * Fails when any text file in the repository contains an em dash or an en
+ * dash, written as the character or as an HTML entity.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -18,9 +18,11 @@ const files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclud
   );
 
 // Built from parts so this file does not match its own pattern.
-const dash = String.fromCharCode(0x2014);
-const entities = ["mdash;", "#8212;", "#x2014;"].map((name) => "&" + name);
-const pattern = new RegExp([dash, ...entities].join("|"), "i");
+const dashes = [0x2014, 0x2013].map((code) => String.fromCharCode(code));
+const entities = ["mdash;", "#8212;", "#x2014;", "ndash;", "#8211;", "#x2013;"].map(
+  (name) => "&" + name,
+);
+const pattern = new RegExp([...dashes, ...entities].join("|"), "i");
 const offenders: string[] = [];
 for (const file of files) {
   let text: string;
@@ -37,7 +39,7 @@ for (const file of files) {
 }
 
 if (offenders.length > 0) {
-  console.error(`Em dashes found:\n${offenders.join("\n")}`);
+  console.error(`Em or en dashes found:\n${offenders.join("\n")}`);
   process.exit(1);
 }
-console.log(`No em dashes in ${files.length} files.`);
+console.log(`No em or en dashes in ${files.length} files.`);
